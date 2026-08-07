@@ -88,7 +88,7 @@ class JarvisSphereComponent implements Component {
 	private spin = 0; // 粒子流累计角度(rad)
 	private decelStart = 0; // 减速开始时间戳(ms)
 	private decelDir = 1; // 减速前的旋转方向(1=顺时针, -1=逆时针)
-	private readonly SPIN_SPEED = 0.35; // 满速每 tick(≈30FPS)的角度增量
+	private readonly SPIN_SPEED = 0.15; // 满速每 tick 角度增量(≈0.72 转/s;远低于 16 点距 22.5°,避免混叠,方向可辨)
 
 	constructor(tui: TUI) {
 		this.tui = tui;
@@ -277,9 +277,10 @@ class JarvisSphereComponent implements Component {
 		const R_out = R * 0.95;
 		const LAYERS = 3;
 		const PER_LAYER = 16;
+		const GAP = 3; // 缺口:每层去掉连续 GAP 个角度(≈67°),打破对称,旋转方向一眼可辨
 		for (let l = 0; l < LAYERS; l++) {
 			const r = R_in + ((R_out - R_in) * l) / (LAYERS - 1);
-			for (let k = 0; k < PER_LAYER; k++) {
+			for (let k = 0; k < PER_LAYER - GAP; k++) {
 				const a = (k / PER_LAYER) * 2 * Math.PI + this.spin * (r / R);
 				setDot(cx + r * Math.cos(a), cy + r * Math.sin(a));
 			}
