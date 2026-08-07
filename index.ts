@@ -196,7 +196,7 @@ class JarvisSphereComponent implements Component {
 		const raw =
 			this.state === "idle"
 				? this.renderRadial(width)
-				: this.renderVortex(width);
+				: this.renderOrbital(width);
 		return raw.map((line) => `${open}${line}${close}`);
 	}
 
@@ -251,8 +251,8 @@ class JarvisSphereComponent implements Component {
 		return lines;
 	}
 
-	/** think/tool 态:漩涡(填充粒子圆盘 + 6 条空螺旋水道),方向由 flow 决定 */
-	private renderVortex(width: number): string[] {
+	/** think/tool 态:均匀粒子流(等角分布 + 微分转速:内慢外快),方向由 flow 决定 */
+	private renderOrbital(width: number): string[] {
 		const w = Math.max(8, width);
 		const rows = Math.max(4, Math.round(w / 2));
 		const dotCols = w * 2;
@@ -261,57 +261,28 @@ class JarvisSphereComponent implements Component {
 		const cy = dotRows / 2;
 		const R = Math.min(dotCols, dotRows) / 2 - 1;
 
-		// 反相漩涡:圆盘填满粒子(带颗粒噪声),6 条螺旋水道留空 → 水流漩涡
-		const R_out = R * 0.95;
-		const R_core = R * 0.2; // 中心实心核(水道从这里开始切出)
-		const ARMS = 6;
-		const SWEEP = 0.7; // 水道角程 ≈40°(< 60° 水道间距,不重叠)
-		const HALF = 0.25; // 水道半宽(rad)≈14.3°,总宽 28.6° < 60° 间距
-		const FILL = 0.75; // 填充密度(颗粒噪声)
-		// 拖尾旋向:顺时针(spin 增大)水道逆时针外卷用 -1,逆时针用 +1;减速沿用减速前方向
-		const dir = this.flow === "cw" ? -1 : this.flow === "ccw" ? 1 : -this.decelDir;
-
 		const codes: number[] = new Array(rows * w).fill(BRAILLE_BASE);
-		for (let row = 0; row < rows; row++) {
-			for (let col = 0; col < w; col++) {
-				let code = BRAILLE_BASE;
-				for (let dr = 0; dr < 4; dr++) {
-					for (let dc = 0; dc < 2; dc++) {
-						const dx = col * 2 + dc;
-						const dy = row * 4 + dr;
-						const ddx = dx - cx;
-						const ddy = dy - cy;
-						const dist = Math.sqrt(ddx * ddx + ddy * ddy);
-						let on = false;
-						if (dist <= R_out) {
-							if (dist <= R_core) {
-								on = true; // 中心核
-							} else {
-								const frac = (dist - R_core) / (R_out - R_core);
-								const a = Math.atan2(ddy, ddx);
-								let inChannel = false;
-								for (let i = 0; i < ARMS; i++) {
-									const base =
-										(i / ARMS) * 2 * Math.PI +
-										this.spin +
-										dir * SWEEP * frac;
-									let diff = a - base;
-									diff =
-										(((diff + Math.PI) % (2 * Math.PI)) + 2 * Math.PI) %
-											(2 * Math.PI) -
-										Math.PI;
-									if (Math.abs(diff) < HALF) {
-										inChannel = true;
-										break;
-									}
-								}
-								if (!inChannel && dotHash(dx, dy) < FILL) on = true;
-							}
-						}
-						if (on) code |= BRAILLE_BITS[dr][dc];
-					}
-				}
-				codes[row * w + col] = code;
+		const setDot = (px: number, py: number) => {
+			const dx = Math.round(px);
+			const dy = Math.round(py);
+			if (dx < 0 || dy < 0 || dx >= dotCols || dy >= dotRows) return;
+			const col = Math.floor(dx / 2);
+			const row = Math.floor(dy / 4);
+			codes[row * w + col] |= BRAILLE_BITS[dy % 4][dx % 2];
+		};
+
+		// 均匀粒子流:3 层等间距半径,每层 16 个等角分布点;中心留空。
+		// 角速度 = spin × (r/R):靠内慢、靠外快(微分旋转);方向由 spin 累计方向决定。
+		const R_in = R * 0.55;
+		const R_out = R * 0.95;
+		const LAYERS = 3;
+		const PER_LAYER = 16;
+		const GAP = 3; // 缺口:每层去掉连续 GAP 个角度(≈67°),打破对称,旋转方向一眼可辨
+		for (let l = 0; l < LAYERS; l++) {
+			const r = R_in + ((R_out - R_in) * l) / (LAYERS - 1);
+			for (let k = 0; k < PER_LAYER - GAP; k++) {
+				const a = (k / PER_LAYER) * 2 * Math.PI + this.spin * (r / R);
+				setDot(cx + r * Math.cos(a), cy + r * Math.sin(a));
 			}
 		}
 
