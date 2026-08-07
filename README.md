@@ -51,7 +51,6 @@ ln -s ~/github/pi-jarvis-sphere ~/.pi/agent/extensions/pi-jarvis-sphere
 ## 🧪 Development & Debugging
 
 - After editing, `/reload` in pi hot-reloads (jiti runs `.ts` directly — no build step).
-- State transitions log `console.log("[jarvis] …")`, visible in pi's logs.
 - Syntax check: `node -e "…typescript.transpileModule…"` (no tsc build).
 - To test: dispatch a `sleep N` sub-agent to observe the tool state (yellow · clockwise); a normal Q&A to observe the think state (red · counter-clockwise).
 

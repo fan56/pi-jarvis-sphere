@@ -51,7 +51,6 @@ ln -s ~/github/pi-jarvis-sphere ~/.pi/agent/extensions/pi-jarvis-sphere
 ## 🧪 开发与调试
 
 - 改完代码在 pi 里 `/reload` 即可热加载(jiti 直接跑 `.ts`,无构建步骤)。
-- 状态切换有 `console.log("[jarvis] …")` 日志,pi 日志里可见。
 - 语法检查:`node -e "…typescript.transpileModule…"`(无 tsc 构建)。
 - 测试:派一个 `sleep N` 的子 agent,即可观察 tool 态(黄·顺);正常问答可观察 think 态(红·逆)。
 
