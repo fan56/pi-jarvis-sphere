@@ -271,12 +271,12 @@ class JarvisSphereComponent implements Component {
 			codes[row * w + col] |= BRAILLE_BITS[dy % 4][dx % 2];
 		};
 
-		// 漩涡:3 条螺旋臂从内半径旋向外缘,中心留空;整幅绕中心刚体旋转。
+		// 漩涡:9 条螺旋臂从内半径旋向外缘,中心留空;整幅绕中心刚体旋转。
 		// 角 = 臂基线(含 spin) + 臂的螺旋扫角(随 r 增大);方向由 spin 累计方向决定。
 		const R_in = R * 0.35; // 中心留空
 		const R_out = R * 0.95;
-		const ARMS = 3;
-		const SWEEP = 1.9; // 每条臂角程 ≈109°(< 120°,臂不重叠)
+		const ARMS = 9;
+		const SWEEP = 0.55; // 每条臂角程 ≈31.5°(< 40° 臂间距,臂不重叠)
 		for (let i = 0; i < ARMS; i++) {
 			const phi0 = (i / ARMS) * 2 * Math.PI + this.spin;
 			for (let r = R_in; r <= R_out; r += 0.9) {
