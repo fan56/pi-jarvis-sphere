@@ -121,6 +121,7 @@ class JarvisSphereComponent implements Component {
 	/** LLM 开始思考:顺时针环形运动 */
 	onThinkingStart(): void {
 		this.thinkingPhase = "cw";
+		console.log("[jarvis] thinking start -> cw");
 		this.tui.requestRender();
 	}
 
@@ -128,16 +129,18 @@ class JarvisSphereComponent implements Component {
 	onThinkingEnd(): void {
 		this.thinkingPhase = "pause";
 		this.phaseDeadline = Date.now() + 500;
+		console.log("[jarvis] thinking end -> pause(0.5s)");
 		this.tui.requestRender();
 	}
 
 	/** 异常中断安全网(F1):thinking_start 后若无 thinking_end(用户 stop/abort/错误),
-	 *  thinkingPhase 会永久卡在 cw。agent_end 时若仍卡在 cw 则复位为 none;
-	 *  正常流程下 thinking_end 先到(已是 pause/ccw/none),守卫跳过,不切断 pause→ccw 过渡。 */
+	 *  也走一遍 pause→ccw 收尾动画(与正常结束一致),避免粒子永久卡在 cw,
+	 *  也不让用户错过停顿+逆时针的收尾。正常流程下 thinking_end 先到
+	 *  (已是 pause/ccw/none),此调用为 no-op。 */
 	abortThinking(): void {
 		if (this.thinkingPhase === "cw") {
-			this.thinkingPhase = "none";
-			this.tui.requestRender();
+			console.log("[jarvis] abort(agent_end) -> wind-down");
+			this.onThinkingEnd();
 		}
 	}
 
@@ -149,8 +152,10 @@ class JarvisSphereComponent implements Component {
 		if (this.thinkingPhase === "pause" && now >= this.phaseDeadline) {
 			this.thinkingPhase = "ccw";
 			this.phaseDeadline = now + 700;
+			console.log("[jarvis] pause -> ccw(0.7s)");
 		} else if (this.thinkingPhase === "ccw" && now >= this.phaseDeadline) {
 			this.thinkingPhase = "none";
+			console.log("[jarvis] ccw -> none");
 		}
 
 		const orbital = this.thinkingPhase !== "none";
@@ -232,7 +237,7 @@ class JarvisSphereComponent implements Component {
 		return lines;
 	}
 
-	/** thinking 状态:粒子绕环运动(cw/pause/ccw 由 spin 决定方向) */
+	/** thinking 状态:量子点绕环运动 —— 环形带(cw/pause/ccw 由 spin 方向决定) */
 	private renderOrbital(width: number): string[] {
 		const w = Math.max(8, width);
 		const rows = Math.max(4, Math.round(w / 2));
@@ -252,13 +257,16 @@ class JarvisSphereComponent implements Component {
 			codes[row * w + col] |= BRAILLE_BITS[dy % 4][dx % 2];
 		};
 
-		// 微弱中心点
-		setDot(cx, cy);
-		// 环形粒子:每个粒子按 (基础角 + spin) 定位
-		const N = Math.max(10, Math.round(R * 2.4));
+		// 环形带:内半径 ~0.55R,外半径 ~0.95R,中心留空(不是细环,有宽度)
+		const R_in = R * 0.55;
+		const R_out = R * 0.95;
+		// 群点:每个点用稳定噪声取随机半径/基角;角速度随半径递增(靠内慢、靠外快,
+		// 微分旋转),整体方向由 spin 累计方向决定(cw 增/ccw 减)。
+		const N = Math.max(24, Math.round(R * 4.5));
 		for (let i = 0; i < N; i++) {
-			const a = (i * 2 * Math.PI) / N + this.spin;
-			setDot(cx + R * Math.cos(a), cy + R * Math.sin(a));
+			const r = R_in + (R_out - R_in) * dotHash(i * 7 + 13, 3);
+			const a = dotHash(i * 31 + 7, 5) * 2 * Math.PI + this.spin * (r / R);
+			setDot(cx + r * Math.cos(a), cy + r * Math.sin(a));
 		}
 
 		const lines: string[] = [];
