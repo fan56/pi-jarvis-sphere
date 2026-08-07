@@ -196,7 +196,7 @@ class JarvisSphereComponent implements Component {
 		const raw =
 			this.state === "idle"
 				? this.renderRadial(width)
-				: this.renderOrbital(width);
+				: this.renderVortex(width);
 		return raw.map((line) => `${open}${line}${close}`);
 	}
 
@@ -251,8 +251,8 @@ class JarvisSphereComponent implements Component {
 		return lines;
 	}
 
-	/** think/tool 态:均匀粒子流(等角分布 + 微分转速:内慢外快),方向由 flow 决定 */
-	private renderOrbital(width: number): string[] {
+	/** think/tool 态:漩涡(ARMS 条螺旋臂绕中心旋转),方向由 flow 决定 */
+	private renderVortex(width: number): string[] {
 		const w = Math.max(8, width);
 		const rows = Math.max(4, Math.round(w / 2));
 		const dotCols = w * 2;
@@ -271,17 +271,16 @@ class JarvisSphereComponent implements Component {
 			codes[row * w + col] |= BRAILLE_BITS[dy % 4][dx % 2];
 		};
 
-		// 均匀粒子流:3 层等间距半径,每层 16 个等角分布点;中心留空。
-		// 角速度 = spin × (r/R):靠内慢、靠外快(微分旋转);方向由 spin 累计方向决定。
-		const R_in = R * 0.55;
+		// 漩涡:3 条螺旋臂从内半径旋向外缘,中心留空;整幅绕中心刚体旋转。
+		// 角 = 臂基线(含 spin) + 臂的螺旋扫角(随 r 增大);方向由 spin 累计方向决定。
+		const R_in = R * 0.35; // 中心留空
 		const R_out = R * 0.95;
-		const LAYERS = 3;
-		const PER_LAYER = 16;
-		const GAP = 3; // 缺口:每层去掉连续 GAP 个角度(≈67°),打破对称,旋转方向一眼可辨
-		for (let l = 0; l < LAYERS; l++) {
-			const r = R_in + ((R_out - R_in) * l) / (LAYERS - 1);
-			for (let k = 0; k < PER_LAYER - GAP; k++) {
-				const a = (k / PER_LAYER) * 2 * Math.PI + this.spin * (r / R);
+		const ARMS = 3;
+		const SWEEP = 1.9; // 每条臂角程 ≈109°(< 120°,臂不重叠)
+		for (let i = 0; i < ARMS; i++) {
+			const phi0 = (i / ARMS) * 2 * Math.PI + this.spin;
+			for (let r = R_in; r <= R_out; r += 0.9) {
+				const a = phi0 + SWEEP * ((r - R_in) / (R_out - R_in));
 				setDot(cx + r * Math.cos(a), cy + r * Math.sin(a));
 			}
 		}
