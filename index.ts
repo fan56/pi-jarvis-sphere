@@ -272,15 +272,17 @@ class JarvisSphereComponent implements Component {
 		};
 
 		// 漩涡:9 条螺旋臂从内半径旋向外缘,中心留空;整幅绕中心刚体旋转。
-		// 角 = 臂基线(含 spin) + 臂的螺旋扫角(随 r 增大);方向由 spin 累计方向决定。
+		// 臂的旋向跟随旋转方向(拖尾臂):顺时针旋转时臂逆时针外卷,逆时针旋转时反之。
 		const R_in = R * 0.35; // 中心留空
 		const R_out = R * 0.95;
 		const ARMS = 9;
 		const SWEEP = 0.55; // 每条臂角程 ≈31.5°(< 40° 臂间距,臂不重叠)
+		// 拖尾臂方向:顺时针(spin 增大)外卷用 -1,逆时针用 +1;减速沿用减速前方向
+		const dir = this.flow === "cw" ? -1 : this.flow === "ccw" ? 1 : -this.decelDir;
 		for (let i = 0; i < ARMS; i++) {
 			const phi0 = (i / ARMS) * 2 * Math.PI + this.spin;
 			for (let r = R_in; r <= R_out; r += 0.9) {
-				const a = phi0 + SWEEP * ((r - R_in) / (R_out - R_in));
+				const a = phi0 + dir * SWEEP * ((r - R_in) / (R_out - R_in));
 				setDot(cx + r * Math.cos(a), cy + r * Math.sin(a));
 			}
 		}
