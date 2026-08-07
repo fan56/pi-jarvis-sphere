@@ -35,7 +35,7 @@ const WIDTH = 14;
 
 // 四态固定色(用户选定):idle 绿 / think 红 / tool 黄 / working 青
 const IDLE_COLOR: [number, number, number] = [0x00, 0xe6, 0x76];
-const THINK_COLOR: [number, number, number] = [0xff, 0x3d, 0x00];
+const THINK_COLOR: [number, number, number] = [0xff, 0x17, 0x44];
 const TOOL_COLOR: [number, number, number] = [0xff, 0xeb, 0x3b];
 const WORKING_COLOR: [number, number, number] = [0x00, 0xe5, 0xff];
 
