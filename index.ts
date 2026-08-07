@@ -1,12 +1,20 @@
 /**
  * Jarvis 粒子球浮层 for Pi
  *
- * 一个 nonCapturing 浮动 overlay,渲染盲文粒子球。监听 pi.events 的
- * tts:started / tts:stopped(由 pi-ext-tts-mimo 发出):
- *   - 默认常驻:静默时 ~10FPS 轻微呼吸,TTS 说话时 ~30FPS 脉冲(像在说话)。
- *   - /jarvis 命令切换开关;状态持久化到 config.json。
+ * 一个 nonCapturing 浮动 overlay,渲染盲文粒子球。三种状态,固定颜色:
+ *   - idle(绿): 径向球 + 中心水波纹,静默时 ~10FPS,说话时 ~30FPS 脉冲。
+ *   - think(红): 逆时针均匀粒子流(微分转速:内慢外快),LLM 思考时。
+ *   - tool (黄): 顺时针均匀粒子流(微分转速:内慢外快),工具调用时。
  *
- * 依赖:pi-ext-tts-mimo 已加入 tts:started/stopped 信号(本计划 Phase 1)。
+ * 状态结束后:粒子流在 1s 内线性减速回 idle;期间若有新事件(think/tool)
+ * 直接跳到新状态,跳过减速动画。
+ *
+ * 信号源:
+ *   - TTS: pi-ext-tts-mimo 发出的 pi.events "tts:started"/"tts:stopped"
+ *   - think: pi.on("message_update") assistantMessageEvent.type
+ *   - tool:  pi.on("tool_execution_start"/"tool_execution_end")
+ *   - 安全网: pi.on("agent_end")(结束事件丢失时也走减速)
+ *
  * 范式参照:@aiwayds/pi-sidebar-panel/extensions/index.ts
  *   (session_start 挂浮层、pi.events 订阅、session_shutdown 清理)。
  */
@@ -23,25 +31,10 @@ const CONFIG_FILE = join(__dirname, "config.json");
 // overlay 列宽;盲文每格 2 点列 => 28 点宽,与 7 行(28 点高)配成方形球
 const WIDTH = 14;
 
-type ThinkingLevel =
-	| "off"
-	| "minimal"
-	| "low"
-	| "medium"
-	| "high"
-	| "xhigh"
-	| "max";
-
-// 热力阶梯:think level 越高颜色越"热"(用户选定方案)
-const LEVEL_COLOR: Record<ThinkingLevel, [number, number, number]> = {
-	off: [0x55, 0x55, 0x55],
-	minimal: [0x4f, 0xc3, 0xf7],
-	low: [0x00, 0xe5, 0xff],
-	medium: [0x76, 0xff, 0x03],
-	high: [0xff, 0xeb, 0x3b],
-	xhigh: [0xff, 0x98, 0x00],
-	max: [0xff, 0x3d, 0x00],
-};
+// 三态固定色(用户选定):idle 绿 / think 红 / tool 黄
+const IDLE_COLOR: [number, number, number] = [0x00, 0xe6, 0x76];
+const THINK_COLOR: [number, number, number] = [0xff, 0x3d, 0x00];
+const TOOL_COLOR: [number, number, number] = [0xff, 0xeb, 0x3b];
 
 interface JarvisConfig {
 	enabled: boolean;
@@ -74,7 +67,7 @@ const BRAILLE_BITS = [
 ];
 const BRAILLE_BASE = 0x2800;
 
-// 每个点的稳定噪声:同一个 (dx,dy) 每帧哈希值不变,避免逐帧随机抖动
+// 每个点的稳定噪声:同一个 (dx,dy) 哈希值不变,避免逐帧随机抖动
 function dotHash(x: number, y: number): number {
 	let h = (x * 73856093) ^ (y * 19349663);
 	h = (h ^ (h >>> 13)) >>> 0;
@@ -88,16 +81,18 @@ class JarvisSphereComponent implements Component {
 	private phase = 0;
 	private frame = 0;
 	speaking = false;
-	private thinkLevel: ThinkingLevel = "off";
-	// thinking 环形动画状态机:none(呼吸/脉冲) | cw(顺时针环转) | pause(停) | ccw(逆时针)
-	private thinkingPhase: "none" | "cw" | "pause" | "ccw" = "none";
-	private spin = 0; // 环形粒子的累计角度(弧度)
-	private phaseDeadline = 0; // 当前 phase 的结束时间戳(ms)
-	private readonly SPIN_SPEED = 0.35; // 每个节拍(≈30FPS)的角度增量
+	// 三态: idle(绿/水波纹) | think(红/逆时针流) | tool(黄/顺时针流)
+	private state: "idle" | "think" | "tool" = "idle";
+	// 粒子流方向: none(静止) | cw | ccw | decel(1s 内线性减速)
+	private flow: "none" | "cw" | "ccw" | "decel" = "none";
+	private spin = 0; // 粒子流累计角度(rad)
+	private decelStart = 0; // 减速开始时间戳(ms)
+	private decelDir = 1; // 减速前的旋转方向(1=顺时针, -1=逆时针)
+	private readonly SPIN_SPEED = 0.35; // 满速每 tick(≈30FPS)的角度增量
 
 	constructor(tui: TUI) {
 		this.tui = tui;
-		// ~30FPS 基础节拍;空闲时每 3 帧才推进+重绘(=> ~10FPS),省 CPU
+		// ~30FPS 基础节拍;idle 时每 3 帧才推进+重绘(=> ~10FPS),省 CPU
 		this.interval = setInterval(() => this.tick(), 33);
 	}
 
@@ -110,87 +105,102 @@ class JarvisSphereComponent implements Component {
 		}
 	}
 
-	/** think level 变化时调用 -> 更新球体颜色 */
-	setThinkLevel(level: ThinkingLevel): void {
-		if (this.thinkLevel !== level) {
-			this.thinkLevel = level;
-			this.tui.requestRender();
-		}
-	}
-
-	/** LLM 开始思考:顺时针环形运动 */
+	/** LLM 开始思考 -> 逆时针红色粒子流 */
 	onThinkingStart(): void {
-		this.thinkingPhase = "cw";
-		console.log("[jarvis] thinking start -> cw");
+		if (this.state === "think") return;
+		this.state = "think";
+		this.flow = "ccw";
+		this.decelStart = 0;
+		console.log("[jarvis] thinking start -> ccw (red)");
 		this.tui.requestRender();
 	}
 
-	/** LLM 结束思考:先停 0.5s,再逆时针 0.7s,然后回到呼吸/脉冲态 */
+	/** 工具调用开始 -> 顺时针黄色粒子流 */
+	onToolStart(): void {
+		if (this.state === "tool") return;
+		this.state = "tool";
+		this.flow = "cw";
+		this.decelStart = 0;
+		console.log("[jarvis] tool start -> cw (yellow)");
+		this.tui.requestRender();
+	}
+
+	/** LLM 结束思考 -> 1s 内减速回 idle */
 	onThinkingEnd(): void {
-		this.thinkingPhase = "pause";
-		this.phaseDeadline = Date.now() + 500;
-		console.log("[jarvis] thinking end -> pause(0.5s)");
-		this.tui.requestRender();
+		if (this.state === "think") this.beginDecel();
 	}
 
-	/** 异常中断安全网(F1):thinking_start 后若无 thinking_end(用户 stop/abort/错误),
-	 *  也走一遍 pause→ccw 收尾动画(与正常结束一致),避免粒子永久卡在 cw,
-	 *  也不让用户错过停顿+逆时针的收尾。正常流程下 thinking_end 先到
-	 *  (已是 pause/ccw/none),此调用为 no-op。 */
+	/** 工具调用结束 -> 1s 内减速回 idle */
+	onToolEnd(): void {
+		if (this.state === "tool") this.beginDecel();
+	}
+
+	/** 异常安全网(agent_end):若仍在流动(结束事件丢失)也走减速收尾 */
 	abortThinking(): void {
-		if (this.thinkingPhase === "cw") {
-			console.log("[jarvis] abort(agent_end) -> wind-down");
-			this.onThinkingEnd();
+		if (this.state !== "idle" && (this.flow === "cw" || this.flow === "ccw")) {
+			this.beginDecel();
 		}
+	}
+
+	private beginDecel(): void {
+		this.decelDir = this.flow === "ccw" ? -1 : 1;
+		this.flow = "decel";
+		this.decelStart = Date.now();
+		console.log("[jarvis] state end -> decel (1s)");
+		this.tui.requestRender();
 	}
 
 	private tick(): void {
 		this.frame++;
 		const now = Date.now();
 
-		// 结束思考后的过渡:pause 0.5s -> ccw 0.7s -> none
-		if (this.thinkingPhase === "pause" && now >= this.phaseDeadline) {
-			this.thinkingPhase = "ccw";
-			this.phaseDeadline = now + 700;
-			console.log("[jarvis] pause -> ccw(0.7s)");
-		} else if (this.thinkingPhase === "ccw" && now >= this.phaseDeadline) {
-			this.thinkingPhase = "none";
-			console.log("[jarvis] ccw -> none");
+		// 减速:1s 内速度线性降到 0,然后回 idle
+		if (this.flow === "decel") {
+			const velFactor = 1 - (now - this.decelStart) / 1000;
+			if (velFactor <= 0) {
+				this.state = "idle";
+				this.flow = "none";
+				this.decelStart = 0;
+				console.log("[jarvis] decel -> idle (green)");
+			} else {
+				this.spin += this.SPIN_SPEED * this.decelDir * velFactor;
+			}
+			this.tui.requestRender();
+			return;
 		}
 
-		const orbital = this.thinkingPhase !== "none";
-		if (orbital) {
-			// y 轴向下的屏幕坐标里,角度递增 = 顺时针
-			if (this.thinkingPhase === "cw") {
-				this.spin += this.SPIN_SPEED;
-				this.tui.requestRender();
-			} else if (this.thinkingPhase === "ccw") {
-				this.spin -= this.SPIN_SPEED;
-				this.tui.requestRender();
-			}
-			// pause:spin 冻结,无需重绘(onThinkingEnd 进入 pause 时已 requestRender;
-			// pause→ccw 转换在上方发生,fallthrough 到 ccw 分支即 requestRender,过渡帧不丢)
-		} else {
-			const every = this.speaking ? 1 : 3; // 说话 ~30FPS / 空闲 ~10FPS
-			if (this.frame % every === 0) {
-				this.phase += this.speaking ? 0.45 : 0.16;
-				this.tui.requestRender();
-			}
+		// 粒子流:y 轴向下的屏幕坐标里,角度递增 = 顺时针
+		if (this.flow === "cw" || this.flow === "ccw") {
+			this.spin += this.flow === "cw" ? this.SPIN_SPEED : -this.SPIN_SPEED;
+			this.tui.requestRender();
+			return;
+		}
+
+		// idle:水波纹 + 呼吸,按帧率节流(说话 30FPS / 空闲 10FPS)
+		const every = this.speaking ? 1 : 3;
+		if (this.frame % every === 0) {
+			this.phase += this.speaking ? 0.45 : 0.16;
+			this.tui.requestRender();
 		}
 	}
 
 	render(width: number): string[] {
-		const [r, g, b] = LEVEL_COLOR[this.thinkLevel] ?? LEVEL_COLOR.off;
+		const [r, g, b] =
+			this.state === "idle"
+				? IDLE_COLOR
+				: this.state === "think"
+					? THINK_COLOR
+					: TOOL_COLOR;
 		const open = `\x1b[38;2;${r};${g};${b}m`;
 		const close = "\x1b[0m";
 		const raw =
-			this.thinkingPhase !== "none"
-				? this.renderOrbital(width)
-				: this.renderRadial(width);
+			this.state === "idle"
+				? this.renderRadial(width)
+				: this.renderOrbital(width);
 		return raw.map((line) => `${open}${line}${close}`);
 	}
 
-	/** 呼吸/说话态:径向盲文球(原 render 逻辑),返回未着色行 */
+	/** idle 态:径向盲文球 —— 中心水波纹(波峰环向外扩散)+ 外围稀疏粒子光晕 */
 	private renderRadial(width: number): string[] {
 		const w = Math.max(6, width);
 		const rows = Math.max(4, Math.round(w / 2)); // 点阵近似方形
@@ -219,13 +229,17 @@ class JarvisSphereComponent implements Component {
 						const ddx = dx - cx;
 						const ddy = dy - cy;
 						const dist = Math.sqrt(ddx * ddx + ddy * ddy);
+						// 水波纹:波峰环从中心向外扩散(phase 推进 => dist 更大的环点亮)
+						const wave = Math.sin(dist * 1.2 - this.phase * 2.0);
 						let on = false;
 						if (dist <= coreR) {
-							on = true; // 实心核
+							on = wave > 0.3; // 中心:水波纹环(取代实心核,有动画)
 						} else if (dist <= R) {
-							// 粒子光晕:越靠外越稀疏 + 固定噪声
+							// 外围:粒子光晕(越靠外越稀疏)+ 波纹微调
 							const edge = (dist - coreR) / (R - coreR);
-							on = dotHash(dx, dy) < density * (1 - edge * 0.6);
+							on =
+								dotHash(dx, dy) < density * (1 - edge * 0.6) &&
+								wave > -0.15;
 						}
 						if (on) code |= BRAILLE_BITS[dr][dc];
 					}
@@ -237,7 +251,7 @@ class JarvisSphereComponent implements Component {
 		return lines;
 	}
 
-	/** thinking 状态:量子点绕环运动 —— 环形带(cw/pause/ccw 由 spin 方向决定) */
+	/** think/tool 态:均匀粒子流(等角分布 + 微分转速:内慢外快),方向由 flow 决定 */
 	private renderOrbital(width: number): string[] {
 		const w = Math.max(8, width);
 		const rows = Math.max(4, Math.round(w / 2));
@@ -257,16 +271,18 @@ class JarvisSphereComponent implements Component {
 			codes[row * w + col] |= BRAILLE_BITS[dy % 4][dx % 2];
 		};
 
-		// 环形带:内半径 ~0.55R,外半径 ~0.95R,中心留空(不是细环,有宽度)
+		// 均匀粒子流:3 层等间距半径,每层 16 个等角分布点;中心留空。
+		// 角速度 = spin × (r/R):靠内慢、靠外快(微分旋转);方向由 spin 累计方向决定。
 		const R_in = R * 0.55;
 		const R_out = R * 0.95;
-		// 群点:每个点用稳定噪声取随机半径/基角;角速度随半径递增(靠内慢、靠外快,
-		// 微分旋转),整体方向由 spin 累计方向决定(cw 增/ccw 减)。
-		const N = Math.max(24, Math.round(R * 4.5));
-		for (let i = 0; i < N; i++) {
-			const r = R_in + (R_out - R_in) * dotHash(i * 7 + 13, 3);
-			const a = dotHash(i * 31 + 7, 5) * 2 * Math.PI + this.spin * (r / R);
-			setDot(cx + r * Math.cos(a), cy + r * Math.sin(a));
+		const LAYERS = 3;
+		const PER_LAYER = 16;
+		for (let l = 0; l < LAYERS; l++) {
+			const r = R_in + ((R_out - R_in) * l) / (LAYERS - 1);
+			for (let k = 0; k < PER_LAYER; k++) {
+				const a = (k / PER_LAYER) * 2 * Math.PI + this.spin * (r / R);
+				setDot(cx + r * Math.cos(a), cy + r * Math.sin(a));
+			}
 		}
 
 		const lines: string[] = [];
@@ -347,10 +363,6 @@ function startSphere(pi: ExtensionAPI, ctx: ExtensionContext): void {
 
 	// 用 globalThis 标志校正初始态(挂载时 TTS 可能已在播放)
 	if ((globalThis as any).__piTtsPlaying) sphere?.setSpeaking(true);
-
-	// 挂载时同步当前 think level
-	const lvl = (ctx as any)?.thinkingLevel ?? pi.getThinkingLevel?.() ?? "off";
-	sphere?.setThinkLevel(lvl as ThinkingLevel);
 }
 
 function stopSphere(): void {
@@ -395,7 +407,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// thinking 信号(参照 pi-think-panel / pi-powerline-footer)。引用模块级 sphere,未挂载时为 null 自动 no-op。
+	// thinking 信号:think = 逆时针红流。引用模块级 sphere,未挂载时为 null 自动 no-op。
 	pi.on("message_update", (event: any, ctx: any) => {
 		if (ctx?.mode !== "tui") return;
 		const t = event?.assistantMessageEvent?.type;
@@ -403,13 +415,17 @@ export default function (pi: ExtensionAPI) {
 		else if (t === "thinking_end") sphere?.onThinkingEnd();
 	});
 
-	pi.on("thinking_level_select", (event: any, ctx: any) => {
+	// 工具调用信号:tool = 顺时针黄流
+	pi.on("tool_execution_start", (_event: any, ctx: any) => {
 		if (ctx?.mode !== "tui") return;
-		sphere?.setThinkLevel(event?.level ?? "off");
+		sphere?.onToolStart();
+	});
+	pi.on("tool_execution_end", (_event: any, ctx: any) => {
+		if (ctx?.mode !== "tui") return;
+		sphere?.onToolEnd();
 	});
 
-	// thinking 异常中断安全网(F1):abort 等路径可能没有 thinking_end,
-	// agent_end 时若仍卡在 cw 则复位(与 titlebar-spinner 的 agent_end 用法同构)
+	// 异常安全网:agent 结束若仍在流动(thinking/tool 结束事件丢失)则减速回 idle
 	pi.on("agent_end", (_event: any, ctx: any) => {
 		if (ctx?.mode !== "tui") return;
 		sphere?.abortThinking();
