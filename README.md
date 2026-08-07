@@ -1,0 +1,83 @@
+# pi-jarvis-sphere 🜄
+
+Pi agent 的 **Jarvis 粒子球**:一个悬浮在 pi 终端右下角的粒子球浮层。它会根据 pi 的实时状态变化颜色与动画 —— 思考时红色逆时针粒子环、调用工具时黄色顺时针粒子环、TTS 说话时脉冲,像一个小助手在"活"着。
+
+![demo](demo.gif)
+
+## ✨ 特性
+
+- **三态动画**,颜色即状态:
+  | 状态 | 颜色 | 动画 |
+  |---|---|---|
+  | 空闲 | 绿色 `#00e676` | 中心水波纹(波峰环向外扩散)+ 粒子光晕呼吸 |
+  | 思考中 (thinking) | 红色 `#ff3d00` | 均匀粒子环 **逆时针** 旋转(3 层 × 16 点,内慢外快微分旋转) |
+  | 工具调用 (tool) | 黄色 `#ffeb3b` | 均匀粒子环 **顺时针** 旋转 |
+  | 减速 (wind-down) | 保持当前色 | 思考/工具结束后的 1 秒减速动画,再回到空闲 |
+- **TTS 说话联动**:pi-ext-tts-mimo 播放语音时,球体脉冲更密更快,像在说话(空闲态下 10FPS → 30FPS)。
+- **环形缺口锚点**:粒子环带有一个缺口,旋转方向一眼可辨。
+- **不抢键盘**:`nonCapturing` 浮层,打字、快捷键完全不受影响。
+- **可开关**:`/jarvis` 命令切换,状态持久化到 `config.json`(默认开启)。
+- **生命周期安全**:随 `session_start` 挂载、`session_shutdown` 清理;子 agent 会话不会重复挂载;`/reload` 不泄漏监听器。
+
+## 📦 安装
+
+```bash
+# 1. 克隆/放到独立目录(与 ~/github 下其他 pi 扩展同约定)
+git clone <your-remote> ~/github/pi-jarvis-sphere
+# 或 cp -r ~/github/pi-jarvis-sphere ~/github/pi-jarvis-sphere
+
+# 2. 符号链接到 pi 扩展目录(pi 自动发现 ~/.pi/agent/extensions/<name>)
+ln -s ~/github/pi-jarvis-sphere ~/.pi/agent/extensions/pi-jarvis-sphere
+
+# 3. 在 pi 里 /reload 即可生效
+```
+
+> 依赖(可选):[pi-ext-tts-mimo](https://gitlab.oss.volvoc3.com/CONNCARCHINA/sparkwit/-/tree/master/pi/extension/pi-ext-tts-mimo) 提供 `tts:started`/`tts:stopped` 信号,球体才能感知"正在说话"。没有它也照常工作,只是没有说话脉冲。
+
+## 🎮 使用
+
+| 命令 | 作用 |
+|---|---|
+| `/jarvis` | 切换球体显示/隐藏(状态写入 `config.json`) |
+
+`config.json`(扩展目录下,默认):
+
+```json
+{ "enabled": true }
+```
+
+## 🏗️ 架构
+
+```
+pi 会话事件                          Jarvis 扩展 (~/github/pi-jarvis-sphere)
+─────────────────────────────────────────────────────────────────────────
+message_update (thinking_start/end) ─┐
+tool_execution_start/end ────────────┼─→ onThinkingStart/onToolStart/onEnd
+agent_end (安全网) ──────────────────┘          │  → 状态机 idle/think/tool/decel
+pi.events tts:started/stopped ──────────────────┤  → speaking 脉冲
+thinking_level_select ──────────────────────────┘
+                                                   │
+                              ctx.ui.custom({ overlay, nonCapturing,
+                                              anchor:"bottom-right" })
+                                                   │
+                                    JarvisSphereComponent.render(width)
+                                    braille 2×4 点阵 + ANSI true-color
+                                    setInterval(tick, 33) → tui.requestRender()
+```
+
+- **渲染**:`Component` 接口(`render(width): string[]`),盲文点阵(`U+2800`+),逐行包裹 ANSI true-color 色码;33ms 心跳驱动重绘(空闲 10FPS / 思考·工具 30FPS)。
+- **信号**:`pi.on("message_update")` 解析 `thinking_start`/`thinking_end`;`pi.on("tool_execution_start/end")`;`pi.events.on("tts:started/stopped")`(EventBus,`on` 返回取消函数);`globalThis.__piTtsPlaying` 缓存初始态。
+- **生命周期**:`session_start` 挂载(仅 `ctx.mode === "tui"`)、`session_shutdown` 清理;挂载前先 `stopSphere()` 防会话切换残留;工厂内不注册事件(防子 agent print 会话)。
+- **浮层**:`ctx.ui.custom(factory, { overlay:true, overlayOptions:{ width:14, maxHeight:9, anchor:"bottom-right", margin:{bottom:1,right:1}, nonCapturing:true, visible:(tw,th)=>tw>=60&&th>=16 }, onHandle })`。
+
+## 🧪 开发与调试
+
+- 改完代码在 pi 里 `/reload` 即可热加载(jiti 直接跑 `.ts`,无构建步骤)。
+- 状态切换有 `console.log("[jarvis] …")` 日志,pi 日志里可见。
+- 语法检查:`node -e "…typescript.transpileModule…"`(无 tsc 构建)。
+- 测试:派一个 `sleep N` 的子 agent,即可观察 tool 态(黄·顺);正常问答可观察 think 态(红·逆)。
+
+## 🗺️ Roadmap
+
+- [ ] V2:外部独立窗口(扩展内起本地 WebSocket + 浏览器,真 3D WebGL 粒子球)
+- [ ] 思考等级联动颜色(off→max 热力阶梯色阶,曾实现后被三态色取代)

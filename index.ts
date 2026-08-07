@@ -1,13 +1,15 @@
 /**
  * Jarvis 粒子球浮层 for Pi
  *
- * 一个 nonCapturing 浮动 overlay,渲染盲文粒子球。三种状态,固定颜色:
+ * 一个 nonCapturing 浮动 overlay,渲染盲文粒子球。四种状态,固定颜色:
  *   - idle(绿): 径向球 + 中心水波纹,静默时 ~10FPS,说话时 ~30FPS 脉冲。
  *   - think(红): 逆时针均匀粒子流(微分转速:内慢外快),LLM 思考时。
  *   - tool (黄): 顺时针均匀粒子流(微分转速:内慢外快),工具调用时。
+ *   - working(青): 顺时针均匀粒子流(同 tool 视觉),模型流式输出答案时。
  *
- * 状态结束后:粒子流在 1s 内线性减速回 idle;期间若有新事件(think/tool)
- * 直接跳到新状态,跳过减速动画。
+ * 状态结束后:粒子流在 1s 内线性减速回 idle(agent_end 收尾)或 working
+ * (think/tool 结束、模型接着输出答案);期间若有新事件直接跳到新状态,
+ * 跳过减速动画。
  *
  * 信号源:
  *   - TTS: pi-ext-tts-mimo 发出的 pi.events "tts:started"/"tts:stopped"
@@ -31,10 +33,11 @@ const CONFIG_FILE = join(__dirname, "config.json");
 // overlay 列宽;盲文每格 2 点列 => 28 点宽,与 7 行(28 点高)配成方形球
 const WIDTH = 14;
 
-// 三态固定色(用户选定):idle 绿 / think 红 / tool 黄
+// 四态固定色(用户选定):idle 绿 / think 红 / tool 黄 / working 青
 const IDLE_COLOR: [number, number, number] = [0x00, 0xe6, 0x76];
 const THINK_COLOR: [number, number, number] = [0xff, 0x3d, 0x00];
 const TOOL_COLOR: [number, number, number] = [0xff, 0xeb, 0x3b];
+const WORKING_COLOR: [number, number, number] = [0x00, 0xe5, 0xff];
 
 interface JarvisConfig {
 	enabled: boolean;
@@ -81,12 +84,13 @@ class JarvisSphereComponent implements Component {
 	private phase = 0;
 	private frame = 0;
 	speaking = false;
-	// 三态: idle(绿/水波纹) | think(红/逆时针流) | tool(黄/顺时针流)
-	private state: "idle" | "think" | "tool" = "idle";
+	// 四态: idle(绿/水波纹) | think(红/逆时针流) | tool(黄/顺时针流) | working(青/顺时针流)
+	private state: "idle" | "think" | "tool" | "working" = "idle";
 	// 粒子流方向: none(静止) | cw | ccw | decel(1s 内线性减速)
 	private flow: "none" | "cw" | "ccw" | "decel" = "none";
 	private spin = 0; // 粒子流累计角度(rad)
 	private decelStart = 0; // 减速开始时间戳(ms)
+	private decelTarget: "idle" | "working" = "idle"; // 减速结束后的目标态
 	private decelDir = 1; // 减速前的旋转方向(1=顺时针, -1=逆时针)
 	private readonly SPIN_SPEED = 0.15; // 满速每 tick 角度增量(≈0.72 转/s;远低于 16 点距 22.5°,避免混叠,方向可辨)
 
@@ -125,28 +129,52 @@ class JarvisSphereComponent implements Component {
 		this.tui.requestRender();
 	}
 
-	/** LLM 结束思考 -> 1s 内减速回 idle */
-	onThinkingEnd(): void {
-		if (this.state === "think") this.beginDecel();
-	}
-
-	/** 工具调用结束 -> 1s 内减速回 idle */
-	onToolEnd(): void {
-		if (this.state === "tool") this.beginDecel();
-	}
-
-	/** 异常安全网(agent_end):若仍在流动(结束事件丢失)也走减速收尾 */
-	abortThinking(): void {
-		if (this.state !== "idle" && (this.flow === "cw" || this.flow === "ccw")) {
-			this.beginDecel();
+	/** 答案流开始(text_delta 首帧) -> 顺时针青色粒子流;幂等:仅在状态切换时生效 */
+	onTextDelta(): void {
+		// 减速中:跳过剩余减速直接跳 working(established rule:新事件直达新状态);
+		// 非减速:仅当已处于活跃的 think/tool/working 流时才 no-op。
+		if (this.flow !== "decel") {
+			if (
+				this.state === "think" ||
+				this.state === "tool" ||
+				this.state === "working"
+			)
+				return;
 		}
+		this.state = "working";
+		this.flow = "cw";
+		this.decelStart = 0;
+		console.log("[jarvis] text delta -> working (cyan, cw)");
+		this.tui.requestRender();
 	}
 
-	private beginDecel(): void {
+	/** LLM 结束思考 -> 1s 内减速;结束后模型流式输出答案 -> working(青/顺时针) */
+	onThinkingEnd(): void {
+		if (this.state === "think") this.beginDecel("working");
+	}
+
+	/** 工具调用结束 -> 1s 内减速;结束后模型流式输出答案 -> working(青/顺时针) */
+	onToolEnd(): void {
+		if (this.state === "tool") this.beginDecel("working");
+	}
+
+	/** 异常安全网(agent_end):若仍在流动(结束事件丢失)也走减速收尾回 idle */
+	abortThinking(): void {
+		if (this.state === "idle") return;
+		if (this.flow === "decel") {
+			// 减速中(think/tool 结束的 1s 窗口内):把落点改回 idle,避免落到 working 永转
+			this.decelTarget = "idle";
+			return;
+		}
+		this.beginDecel("idle");
+	}
+
+	private beginDecel(target: "idle" | "working" = "idle"): void {
+		this.decelTarget = target;
 		this.decelDir = this.flow === "ccw" ? -1 : 1;
 		this.flow = "decel";
 		this.decelStart = Date.now();
-		console.log("[jarvis] state end -> decel (1s)");
+		console.log(`[jarvis] state end -> decel (1s, target ${target})`);
 		this.tui.requestRender();
 	}
 
@@ -154,14 +182,17 @@ class JarvisSphereComponent implements Component {
 		this.frame++;
 		const now = Date.now();
 
-		// 减速:1s 内速度线性降到 0,然后回 idle
+		// 减速:1s 内速度线性降到 0,然后落到 decelTarget(idle 或 working)
 		if (this.flow === "decel") {
 			const velFactor = 1 - (now - this.decelStart) / 1000;
 			if (velFactor <= 0) {
-				this.state = "idle";
-				this.flow = "none";
+				this.state = this.decelTarget;
+				if (this.decelTarget === "working") this.flow = "cw";
+				else this.flow = "none";
 				this.decelStart = 0;
-				console.log("[jarvis] decel -> idle (green)");
+				console.log(
+					`[jarvis] decel -> ${this.decelTarget === "working" ? "working (cyan, cw)" : "idle (green)"}`,
+				);
 			} else {
 				this.spin += this.SPIN_SPEED * this.decelDir * velFactor;
 			}
@@ -190,7 +221,9 @@ class JarvisSphereComponent implements Component {
 				? IDLE_COLOR
 				: this.state === "think"
 					? THINK_COLOR
-					: TOOL_COLOR;
+					: this.state === "tool"
+						? TOOL_COLOR
+						: WORKING_COLOR;
 		const open = `\x1b[38;2;${r};${g};${b}m`;
 		const close = "\x1b[0m";
 		const raw =
@@ -414,6 +447,7 @@ export default function (pi: ExtensionAPI) {
 		const t = event?.assistantMessageEvent?.type;
 		if (t === "thinking_start") sphere?.onThinkingStart();
 		else if (t === "thinking_end") sphere?.onThinkingEnd();
+		else if (t === "text_delta") sphere?.onTextDelta();
 	});
 
 	// 工具调用信号:tool = 顺时针黄流
