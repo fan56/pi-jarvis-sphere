@@ -12,7 +12,7 @@
   | --- | --- | --- |
   | Idle | green `#00e676` | curl noise flow field (slow) + center water ripple |
   | Thinking | amber `#ffab00` | particle refraction (slow polylines, boundary bounce + internal random refraction) |
-  | Tool call | yellow `#ffeb3b` | uniform particle ring, **clockwise** — center hollow, 3 layers × 16 dots, differential rotation: inner slower, outer faster |
+  | Tool call | yellow `#ffeb3b` | uniform particle ring, **clockwise** — center hollow, 3 layers × 24 dots, differential rotation: inner slower, outer faster |
   | Working (streaming answer) | cyan `#00E5FF` | particle refraction (fast polylines) |
   | Sub-agent | yellow (tool) | sub-agent activity reuses the tool animation via `subagents:started` / `subagents:completed` / `subagents:failed` signals |
   | Wind-down | keeps current color | 1-second ease-out deceleration after thinking/tool/working ends, then back to idle |

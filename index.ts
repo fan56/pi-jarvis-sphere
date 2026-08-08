@@ -438,13 +438,13 @@ class JarvisSphereComponent implements Component {
 			codes[row * w + col] |= BRAILLE_BITS[dy % 4][dx % 2];
 		};
 
-		// 均匀粒子流:3 层等间距半径,每层 16 个等角分布点;中心留空。
+		// 均匀粒子流:3 层等间距半径,每层 24 个等角分布点;中心留空。
 		// 角速度 = spin × (r/R):靠内慢、靠外快(微分旋转);方向由 spin 累计方向决定。
 		const R_in = R * 0.55;
 		const R_out = R * 0.95;
 		const LAYERS = 3;
-		const PER_LAYER = 16;
-		const GAP = 3; // 缺口:每层去掉连续 GAP 个角度(≈67°),打破对称,旋转方向一眼可辨
+		const PER_LAYER = 24;
+		const GAP = 3; // 缺口:每层去掉连续 GAP 个角度(45°),打破对称,旋转方向一眼可辨
 		for (let l = 0; l < LAYERS; l++) {
 			const r = R_in + ((R_out - R_in) * l) / (LAYERS - 1);
 			for (let k = 0; k < PER_LAYER - GAP; k++) {
@@ -463,7 +463,8 @@ class JarvisSphereComponent implements Component {
 		return lines;
 	}
 
-	/** 初始化/调节粒子数:首次在圆内均匀分布;后续按 targetN 增减 */	private ensureParticles(
+	/** 初始化/调节粒子数:首次在圆内均匀分布;后续按 targetN 增减 */
+	private ensureParticles(
 		cx: number,
 		cy: number,
 		R: number,
