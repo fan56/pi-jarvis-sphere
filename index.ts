@@ -3,13 +3,15 @@
  *
  * 一个 nonCapturing 浮动 overlay,渲染盲文粒子球。四种状态,固定颜色:
  *   - idle(绿): curl noise 慢流场 + 中心水波纹,静默 ~10FPS,说话 ~30FPS 脉冲。
- *   - think(红): curl noise 逆时针涡流(高速),LLM 思考时。
+ *   - think(红): 粒子折射(慢速折线,边界反射+内部随机折射),LLM 思考时。
  *   - tool (黄): curl noise 顺时针涡流(高速),工具调用时。
- *   - working(青): curl noise 顺时针涡流(更高速),模型流式输出答案时。
+ *   - working(青): 粒子折射(快速折线),模型流式输出答案时。
  *
- * 渲染核心:curl noise 流场驱动持久化粒子。curl noise 是无散度(divergence-
- * free)速度场,粒子沿 noise 等高线形成长而扭转的流线,永不收敛到一点,产生
- * 流体涡旋感。粒子在圆盘内重生,生命周期 sin 渐变(首尾淡出)。
+ * 渲染核心:idle/tool 用 curl noise 流场驱动持久化粒子(curl noise 是无散度
+ * (divergence-free)速度场,粒子沿 noise 等高线形成长而扭转的流线,永不收敛
+ * 到一点,产生流体涡旋感;粒子在圆内重生,生命周期 sin 渐变(首尾淡出))。
+ * think/working 用粒子折射:粒子在圆内线性运动,遇边界反射、小概率内部
+ * 随机折射,折射点连成折线(光线折射/闪电感),3-6 次折射后重生。
  *
  * 状态结束后:粒子流在 1s 内 ease-out 减速回 idle(agent_end 收尾)或 working
  * (think/tool 结束、模型接着输出答案);期间若有新事件直接跳到新状态,
@@ -20,6 +22,8 @@
  *   - TTS: pi-ext-tts-mimo 发出的 pi.events "tts:started"/"tts:stopped"
  *   - think: pi.on("message_update") assistantMessageEvent.type
  *   - tool:  pi.on("tool_execution_start"/"tool_execution_end")
+ *   - subagent: pi.events "subagents:started"/"subagents:completed"/"subagents:failed"
+ *     (pi-subagents 在父会话 bus 上 emit,复用 tool 动画)
  *   - 安全网: pi.on("agent_end")(结束事件丢失时也走减速)
  *
  * 范式参照:@aiwayds/pi-sidebar-panel/extensions/index.ts
@@ -86,8 +90,10 @@ function hash2(x: number, y: number): number {
 
 // 2D 值噪声:整数格点 smoothstep 双线性插值,返回 [0,1)
 function valueNoise(x: number, y: number): number {
-	const xi = Math.floor(x), yi = Math.floor(y);
-	const xf = x - xi, yf = y - yi;
+	const xi = Math.floor(x),
+		yi = Math.floor(y);
+	const xf = x - xi,
+		yf = y - yi;
 	const u = xf * xf * (3 - 2 * xf);
 	const v = yf * yf * (3 - 2 * yf);
 	const a = hash2(xi, yi);
@@ -100,15 +106,131 @@ function valueNoise(x: number, y: number): number {
 // 2D curl of scalar noise -> divergence-free 速度场 [vx, vy]
 // 梯度 (dX,dY) 旋转 90° = (dY, -dX)
 function curl2D(x: number, y: number, delta: number): [number, number] {
-	const dX = (valueNoise(x + delta, y) - valueNoise(x - delta, y)) / (2 * delta);
-	const dY = (valueNoise(x, y + delta) - valueNoise(x, y - delta)) / (2 * delta);
+	const dX =
+		(valueNoise(x + delta, y) - valueNoise(x - delta, y)) / (2 * delta);
+	const dY =
+		(valueNoise(x, y + delta) - valueNoise(x, y - delta)) / (2 * delta);
 	return [dY, -dX];
 }
 
 // 流场粒子:dot 网格连续坐标 + 生命周期
 interface Particle {
-	x: number; y: number;
-	age: number; life: number;
+	x: number;
+	y: number;
+	age: number;
+	life: number;
+}
+
+// --- 折射粒子:圆内运动,边界反射+内部随机折射,折线连成光线感(think/working) ---
+
+interface RefractParticle {
+	px: number;
+	py: number; // 当前位置(dot 网格坐标)
+	vx: number;
+	vy: number; // 单位方向向量
+	pts: number[]; // 折射点 flat 坐标 [x0,y0,x1,y1,...]
+	bounces: number; // 已折射次数
+	maxBounces: number; // 3-6 随机
+}
+
+const REFRACT_COUNT = 16;
+
+// 生成/重生折射粒子:圆内随机位置 + 随机单位方向,折线点重置
+function spawnRefract(
+	p: RefractParticle,
+	cx: number,
+	cy: number,
+	R: number,
+): void {
+	// 圆内均匀随机位置(√rand 保证面积均匀)
+	const a = Math.random() * 6.2831853;
+	const r = Math.sqrt(Math.random()) * R * 0.6;
+	p.px = cx + r * Math.cos(a);
+	p.py = cy + r * Math.sin(a);
+	const d = Math.random() * 6.2831853;
+	p.vx = Math.cos(d);
+	p.vy = Math.sin(d);
+	p.pts = [p.px, p.py];
+	p.bounces = 0;
+	p.maxBounces = 3 + ((Math.random() * 4) | 0); // 3,4,5,6
+}
+
+// 推进折射粒子一步:线性位移;出界 => 圆边界反射;小概率 => 内部随机折射
+function stepRefract(
+	p: RefractParticle,
+	cx: number,
+	cy: number,
+	R: number,
+	speed: number,
+): void {
+	p.px += p.vx * speed;
+	p.py += p.vy * speed;
+	// 圆边界反射:法线 = (粒子-圆心).normalize
+	const dx = p.px - cx,
+		dy = p.py - cy;
+	const d2 = dx * dx + dy * dy;
+	if (d2 > R * R) {
+		const d = Math.sqrt(d2);
+		const nx = dx / d,
+			ny = dy / d;
+		const dot = p.vx * nx + p.vy * ny;
+		p.vx -= 2 * dot * nx;
+		p.vy -= 2 * dot * ny;
+		p.px = cx + nx * R * 0.97;
+		p.py = cy + ny * R * 0.97;
+		p.pts.push(p.px, p.py);
+		p.bounces++;
+		if (p.bounces >= p.maxBounces) spawnRefract(p, cx, cy, R);
+	} else if (Math.random() < 0.02) {
+		// 随机内部折射:±~70° 偏转
+		const ang = (Math.random() - 0.5) * 2.4;
+		const c = Math.cos(ang),
+			s = Math.sin(ang);
+		const nvx = p.vx * c - p.vy * s;
+		const nvy = p.vx * s + p.vy * c;
+		p.vx = nvx;
+		p.vy = nvy;
+		p.pts.push(p.px, p.py);
+		p.bounces++;
+		if (p.bounces >= p.maxBounces) spawnRefract(p, cx, cy, R);
+	}
+}
+
+// Bresenham 画线:在盲文 codes 数组上画 (x0,y0)->(x1,y1) 线段
+function lineDot(
+	codes: number[],
+	w: number,
+	dotCols: number,
+	dotRows: number,
+	x0: number,
+	y0: number,
+	x1: number,
+	y1: number,
+): void {
+	let x = Math.round(x0),
+		y = Math.round(y0);
+	const ex = Math.round(x1),
+		ey = Math.round(y1);
+	const adx = Math.abs(ex - x),
+		ady = Math.abs(ey - y);
+	const sx = x < ex ? 1 : -1,
+		sy = y < ey ? 1 : -1;
+	let err = adx - ady;
+	while (true) {
+		if (x >= 0 && y >= 0 && x < dotCols && y < dotRows) {
+			codes[(y >> 2) * w + (x >> 1)] |= BRAILLE_BITS[y & 3][x & 1];
+		}
+		if (x === ex && y === ey) break;
+		const e2 = 2 * err;
+		if (e2 > -ady) {
+			err -= ady;
+			x += sx;
+		}
+		if (e2 < adx) {
+			err += adx;
+			y += sy;
+		}
+	}
 }
 
 class JarvisSphereComponent implements Component {
@@ -128,8 +250,12 @@ class JarvisSphereComponent implements Component {
 	private particles: Particle[] = [];
 	private fieldSpeed = 0.06; // 粒子位移系数(每 step)
 	private fieldDir = 1; // 1=顺时针(curl 正方向), -1=逆时针
-	private fieldCount = 85; // 目标粒子数
+	private fieldCount = 120; // 目标粒子数
 	private fieldScroll = 0.02; // 噪声场平移速度(流场演变,避免静态)
+	// 折射粒子系统(think/working 态):圆内运动,边界反射+内部随机折射,折线渲染
+	private refractParticles: RefractParticle[] = [];
+	private refractSpeed = 1.04; // 折射位移系数
+	private velFactor = 1; // 减速 ease-out 系数(1=全速,0=停止),renderRefract 用
 
 	constructor(tui: TUI) {
 		this.tui = tui;
@@ -207,6 +333,7 @@ class JarvisSphereComponent implements Component {
 	}
 
 	private beginDecel(target: "idle" | "working" = "idle"): void {
+		if (this.flow === "decel") return; // 已在减速中,不重启(双信号防抖: tool_execution_end + subagents:completed)
 		this.decelTarget = target;
 		this.decelDir = this.fieldDir; // 记忆当前流场方向,减速期间保持
 		this.flow = "decel";
@@ -259,7 +386,11 @@ class JarvisSphereComponent implements Component {
 						: WORKING_COLOR;
 		const open = `\x1b[38;2;${r};${g};${b}m`;
 		const close = "\x1b[0m";
-		const raw = this.renderField(width);
+		// think/working -> 粒子折射;idle/tool -> curl noise 流场(tool 为顺时针高速涡流)
+		const raw =
+			this.state === "think" || this.state === "working"
+				? this.renderRefract(width)
+				: this.renderField(width);
 		return raw.map((line) => `${open}${line}${close}`);
 	}
 
@@ -267,41 +398,53 @@ class JarvisSphereComponent implements Component {
 	private applyFieldParams(s: "idle" | "think" | "tool" | "working"): void {
 		switch (s) {
 			case "idle":
-				this.fieldSpeed = 0.06; this.fieldDir = 1; this.fieldCount = 85; this.fieldScroll = 0.02;
+				this.fieldSpeed = 0.06;
+				this.fieldDir = 1;
+				this.fieldCount = 120;
+				this.fieldScroll = 0.02;
 				break;
 			case "think":
-				this.fieldSpeed = 0.22; this.fieldDir = -1; this.fieldCount = 85; this.fieldScroll = 0.05;
+				this.refractSpeed = 1.04; // 折射
 				break;
 			case "tool":
-				this.fieldSpeed = 0.22; this.fieldDir = 1; this.fieldCount = 85; this.fieldScroll = 0.05;
+				this.fieldSpeed = 0.22;
+				this.fieldDir = 1;
+				this.fieldCount = 85;
+				this.fieldScroll = 0.05; // 顺时针高速流场（早期参数）
 				break;
 			case "working":
-				this.fieldSpeed = 0.30; this.fieldDir = 1; this.fieldCount = 85; this.fieldScroll = 0.08;
+				this.refractSpeed = 1.04; // 快速折射
 				break;
 		}
 	}
 
-	/** 初始化/调节粒子数:首次用 Fibonacci spiral 均匀分布;后续按 targetN 增减 */
-	private ensureParticles(cx: number, cy: number, R: number, targetN: number): void {
+	/** 初始化/调节粒子数:首次在圆内均匀分布;后续按 targetN 增减 */
+	private ensureParticles(
+		cx: number,
+		cy: number,
+		R: number,
+		targetN: number,
+	): void {
 		if (this.particles.length === 0) {
 			for (let i = 0; i < targetN; i++) {
-				const r = Math.sqrt((i + 0.5) / targetN) * R * 0.9;
-				const a = i * 2.39996323; // golden angle
+				// 圆内均匀随机分布(√rand 保证面积均匀)
+				const r0 = Math.sqrt(Math.random()) * R * 0.9;
+				const a0 = Math.random() * 6.2831853;
 				this.particles.push({
-					x: cx + r * Math.cos(a),
-					y: cy + r * Math.sin(a),
+					x: cx + r0 * Math.cos(a0),
+					y: cy + r0 * Math.sin(a0),
 					age: Math.random() * 100,
 					life: 80 + Math.random() * 80,
 				});
 			}
 		} else if (this.particles.length < targetN) {
-			// 不足:追加随机位置粒子
+			// 不足:追加圆内随机位置粒子
 			for (let i = this.particles.length; i < targetN; i++) {
-				const a = Math.random() * Math.PI * 2;
-				const rr = Math.sqrt(Math.random()) * R * 0.85;
+				const r1 = Math.sqrt(Math.random()) * R * 0.85;
+				const a1 = Math.random() * 6.2831853;
 				this.particles.push({
-					x: cx + rr * Math.cos(a),
-					y: cy + rr * Math.sin(a),
+					x: cx + r1 * Math.cos(a1),
+					y: cy + r1 * Math.sin(a1),
 					age: 0,
 					life: 80 + Math.random() * 80,
 				});
@@ -338,12 +481,14 @@ class JarvisSphereComponent implements Component {
 			p.x += vx * speed * dir;
 			p.y += vy * speed * dir;
 			p.age++;
-			const dx = p.x - cx, dy = p.y - cy;
-			if (dx * dx + dy * dy > R * R || p.age > p.life) {
-				const a = Math.random() * Math.PI * 2;
-				const rr = Math.sqrt(Math.random()) * R * 0.85;
-				p.x = cx + rr * Math.cos(a);
-				p.y = cy + rr * Math.sin(a);
+			// 圆边界:粒子超出半径 R 或寿终则重生
+			const dx2 = p.x - cx,
+				dy2 = p.y - cy;
+			if (dx2 * dx2 + dy2 * dy2 > R * R || p.age > p.life) {
+				const r2 = Math.sqrt(Math.random()) * R * 0.85;
+				const a2 = Math.random() * 6.2831853;
+				p.x = cx + r2 * Math.cos(a2);
+				p.y = cy + r2 * Math.sin(a2);
 				p.age = 0;
 				p.life = 80 + Math.random() * 80;
 			}
@@ -386,7 +531,8 @@ class JarvisSphereComponent implements Component {
 				for (let col = 0; col < w; col++) {
 					for (let dr = 0; dr < 4; dr++) {
 						for (let dc = 0; dc < 2; dc++) {
-							const dx = col * 2 + dc, dy = row * 4 + dr;
+							const dx = col * 2 + dc,
+								dy = row * 4 + dr;
 							const dist = Math.hypot(dx - cx, dy - cy);
 							if (dist <= coreR) {
 								const wave = Math.sin(dist * 1.5 - this.phase * 2.0);
@@ -396,6 +542,84 @@ class JarvisSphereComponent implements Component {
 					}
 				}
 			}
+		}
+
+		const lines: string[] = [];
+		for (let row = 0; row < rows; row++) {
+			let line = "";
+			for (let col = 0; col < w; col++)
+				line += String.fromCharCode(codes[row * w + col]);
+			lines.push(line);
+		}
+		return lines;
+	}
+
+	/** 折射粒子渲染:圆内运动,边界反射+内部随机折射,折线连成光线/闪电感 */
+	private renderRefract(width: number): string[] {
+		const w = Math.max(6, width);
+		const rows = Math.max(4, Math.round(w / 2));
+		const dotCols = w * 2;
+		const dotRows = rows * 4;
+		const cx = dotCols / 2;
+		const cy = dotRows / 2;
+		const R = Math.min(dotCols, dotRows) / 2 - 1;
+
+		// 首次初始化折射粒子
+		if (this.refractParticles.length === 0) {
+			for (let i = 0; i < REFRACT_COUNT; i++) {
+				const p: RefractParticle = {
+					px: 0,
+					py: 0,
+					vx: 0,
+					vy: 0,
+					pts: [],
+					bounces: 0,
+					maxBounces: 3,
+				};
+				spawnRefract(p, cx, cy, R);
+				this.refractParticles.push(p);
+			}
+		}
+
+		// 减速 ease-out 系数(与 stepParticles 同逻辑),renderRefract 用
+		if (this.flow === "decel") {
+			const tt = (Date.now() - this.decelStart) / 1000;
+			this.velFactor = Math.max(0, (1 - tt) ** 2);
+		} else {
+			this.velFactor = 1;
+		}
+
+		// 推进粒子
+		const speed = this.refractSpeed * this.velFactor;
+		for (const p of this.refractParticles) stepRefract(p, cx, cy, R, speed);
+
+		// 渲染折线:连接所有折射点 + 最后折射点到当前位置
+		const codes: number[] = new Array(rows * w).fill(BRAILLE_BASE);
+		for (const p of this.refractParticles) {
+			for (let i = 0; i < p.pts.length - 2; i += 2) {
+				lineDot(
+					codes,
+					w,
+					dotCols,
+					dotRows,
+					p.pts[i],
+					p.pts[i + 1],
+					p.pts[i + 2],
+					p.pts[i + 3],
+				);
+			}
+			const last = p.pts.length - 2;
+			if (last >= 0)
+				lineDot(
+					codes,
+					w,
+					dotCols,
+					dotRows,
+					p.pts[last],
+					p.pts[last + 1],
+					p.px,
+					p.py,
+				);
 		}
 
 		const lines: string[] = [];
@@ -449,6 +673,16 @@ function startSphere(pi: ExtensionAPI, ctx: ExtensionContext): void {
 		}) as (data: unknown) => void),
 		pi.events.on("tts:stopped", (() => {
 			sphere?.setSpeaking(false);
+		}) as (data: unknown) => void),
+		// sub-agent 信号(pi-subagents 在父会话 bus 上 emit):复用 tool 动画
+		pi.events.on("subagents:started", (() => {
+			sphere?.onToolStart();
+		}) as (data: unknown) => void),
+		pi.events.on("subagents:completed", (() => {
+			sphere?.onToolEnd();
+		}) as (data: unknown) => void),
+		pi.events.on("subagents:failed", (() => {
+			sphere?.onToolEnd();
 		}) as (data: unknown) => void),
 	];
 

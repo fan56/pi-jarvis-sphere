@@ -2,22 +2,23 @@
 
 [English](README.md) | [中文](README.zh.md)
 
-Pi agent 的 **Jarvis 粒子球**:一个悬浮在 pi 终端右下角的粒子球浮层。它会根据 pi 的实时状态变化颜色与动画 -- 思考时红色逆时针粒子环、调用工具时黄色顺时针粒子环、生成答案时青色顺时针粒子环、TTS 说话时脉冲,像一个小助手在"活"着。
-
-![demo](demo.gif)
+Pi agent 的 **Jarvis 粒子球**:一个悬浮在 pi 终端右下角的粒子球浮层。它会根据 pi 的实时状态变化颜色与动画 -- 思考时琥珀色折射折线、调用工具时黄色顺时针 curl noise 涡流、生成答案时青色快速折射、TTS 说话时脉冲,像一个小助手在"活"着。sub-agent 活动(通过 pi-subagents)也会像 tool 态一样让球动画。
 
 ## ✨ 特性
 
 - **四态动画**,颜色即状态:
+
   | 状态 | 颜色 | 动画 |
-  |---|---|---|
-  | 空闲 | 绿色 `#00e676` | 中心水波纹(波峰环向外扩散)+ 粒子光晕呼吸 |
-  | 思考中 (thinking) | 红色 `#ff3d00` | 均匀粒子环 **逆时针** 旋转(3 层 × 16 点,内慢外快微分旋转) |
-  | 工具调用 (tool) | 黄色 `#ffeb3b` | 均匀粒子环 **顺时针** 旋转 |
-  | 生成答案 (working) | 青色 `#00E5FF` | 均匀粒子环 **顺时针** 旋转(模型流式输出答案时) |
-  | 减速 (wind-down) | 保持当前色 | 思考/工具/生成结束后的 1 秒减速动画,再回到空闲 |
+  | --- | --- | --- |
+  | 空闲 | 绿色 `#00e676` | curl noise 流场(慢)+ 中心水波纹 |
+  | 思考中 (thinking) | 琥珀色 `#ffab00` | 粒子折射(慢速折线,边界反射 + 内部随机折射) |
+  | 工具调用 (tool) | 黄色 `#ffeb3b` | curl noise 涡流,**顺时针**、高速 |
+  | 生成答案 (working) | 青色 `#00E5FF` | 粒子折射(快速折线) |
+  | sub-agent | 黄色(tool) | sub-agent 活动通过 `subagents:started` / `subagents:completed` / `subagents:failed` 信号复用 tool 动画 |
+  | 减速 (wind-down) | 保持当前色 | 思考/工具/生成结束后的 1 秒 ease-out 减速,再回到空闲 |
+
 - **TTS 说话联动**:pi-ext-tts-mimo 播放语音时,球体脉冲更密更快,像在说话(空闲态下 10FPS -> 30FPS)。
-- **环形缺口锚点**:粒子环带有一个缺口,旋转方向一眼可辨。
+- **方向锚点**:流场顺时针/逆时针旋转,减速时保持方向可辨。
 - **不抢键盘**:`nonCapturing` 浮层,打字、快捷键完全不受影响。
 - **可开关**:`/jarvis` 命令切换,状态持久化到 `config.json`(默认开启)。
 - **生命周期安全**:随 `session_start` 挂载、`session_shutdown` 清理;子 agent 会话不会重复挂载;`/reload` 不泄漏监听器。
@@ -52,7 +53,7 @@ ln -s ~/github/pi-jarvis-sphere ~/.pi/agent/extensions/pi-jarvis-sphere
 
 - 改完代码在 pi 里 `/reload` 即可热加载(jiti 直接跑 `.ts`,无构建步骤)。
 - 语法检查:`node -e "…typescript.transpileModule…"`(无 tsc 构建)。
-- 测试:派一个 `sleep N` 的子 agent,即可观察 tool 态(黄·顺);正常问答可观察 think 态(红·逆)。
+- 测试:派一个 `sleep N` 的子 agent,即可观察 sub-agent/tool 态(黄·顺时针涡流);正常问答可观察 think 态(琥珀·折射)。
 
 ## 🗺️ Roadmap
 

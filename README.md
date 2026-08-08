@@ -2,22 +2,23 @@
 
 [English](README.md) | [中文](README.zh.md)
 
-**Jarvis particle sphere for the [pi](https://github.com/earendil-works/pi-coding-agent) agent** — a particle-sphere overlay floating in the bottom-right corner of your pi terminal. It shifts color and animation with pi's live state — red counter-clockwise ring while thinking, yellow clockwise ring during tool calls, cyan clockwise ring while streaming the answer, and a denser pulse while TTS speaks — like a little assistant that's alive.
-
-![demo](demo.gif)
+**Jarvis particle sphere for the [pi](https://github.com/earendil-works/pi-coding-agent) agent** — a particle-sphere overlay floating in the bottom-right corner of your pi terminal. It shifts color and animation with pi's live state — amber refraction while thinking, yellow clockwise curl-noise vortex during tool calls, cyan refraction while streaming the answer, and a denser pulse while TTS speaks — like a little assistant that's alive. Sub-agent activity (via [pi-subagents](https://github.com/tintinweb/pi-subagents)) also animates the sphere as the tool state.
 
 ## ✨ Features
 
 - **Four-state animation**, color = state:
+
   | State | Color | Animation |
-  |---|---|---|
-  | Idle | green `#00e676` | center water ripple (wavefronts expanding outward) + particle halo breathing |
-  | Thinking | red `#ff3d00` | uniform particle ring, **counter-clockwise** (3 layers × 16 dots, differential rotation: inner slower, outer faster) |
-  | Tool call | yellow `#ffeb3b` | uniform particle ring, **clockwise** |
-  | Working (streaming answer) | cyan `#00E5FF` | uniform particle ring, **clockwise** (while the model streams its answer) |
-  | Wind-down | keeps current color | 1-second deceleration after thinking/tool/working ends, then back to idle |
+  | --- | --- | --- |
+  | Idle | green `#00e676` | curl noise flow field (slow) + center water ripple |
+  | Thinking | amber `#ffab00` | particle refraction (slow polylines, boundary bounce + internal random refraction) |
+  | Tool call | yellow `#ffeb3b` | curl noise vortex, **clockwise**, high speed |
+  | Working (streaming answer) | cyan `#00E5FF` | particle refraction (fast polylines) |
+  | Sub-agent | yellow (tool) | sub-agent activity reuses the tool animation via `subagents:started` / `subagents:completed` / `subagents:failed` signals |
+  | Wind-down | keeps current color | 1-second ease-out deceleration after thinking/tool/working ends, then back to idle |
+
 - **TTS sync**: when [pi-ext-tts-mimo](https://github.com/fan56/pi-jarvis-sphere) plays speech, the sphere pulses denser and faster, as if talking (idle 10 FPS → 30 FPS while speaking).
-- **Direction anchor**: the ring has a gap so the rotation direction is unmistakable at a glance.
+- **Direction anchor**: the flow field rotates clockwise/counter-clockwise; deceleration is eased so direction stays readable.
 - **Non-intrusive**: a `nonCapturing` overlay — typing and keybindings are completely unaffected.
 - **Toggleable**: `/jarvis` toggles it on/off, persisted to `config.json` (on by default).
 - **Lifecycle-safe**: mounts on `session_start`, cleans up on `session_shutdown`; sub-agent sessions don't double-mount; `/reload` doesn't leak listeners.
@@ -52,7 +53,7 @@ ln -s ~/github/pi-jarvis-sphere ~/.pi/agent/extensions/pi-jarvis-sphere
 
 - After editing, `/reload` in pi hot-reloads (jiti runs `.ts` directly — no build step).
 - Syntax check: `node -e "…typescript.transpileModule…"` (no tsc build).
-- To test: dispatch a `sleep N` sub-agent to observe the tool state (yellow · clockwise); a normal Q&A to observe the think state (red · counter-clockwise).
+- To test: dispatch a `sleep N` sub-agent to observe the sub-agent/tool state (yellow · clockwise vortex); a normal Q&A to observe the think state (amber · refraction).
 
 ## 🗺️ Roadmap
 
