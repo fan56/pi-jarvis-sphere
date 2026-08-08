@@ -12,7 +12,7 @@ Pi agent 的 **Jarvis 粒子球**:一个悬浮在 pi 终端右下角的粒子球
   | --- | --- | --- |
   | 空闲 | 绿色 `#00e676` | curl noise 流场(慢)+ 中心水波纹 |
   | 思考中 (thinking) | 琥珀色 `#ffab00` | 粒子折射(慢速折线,边界反射 + 内部随机折射) |
-  | 工具调用 (tool) | 黄色 `#ffeb3b` | 均匀粒子环 **顺时针** — 中心留空,3 层 × 24 点,微分旋转:内慢外快 |
+  | 工具调用 (tool) | 黄色 `#ffeb3b` | 均匀粒子环 **顺时针** — 中心留空,4 层 × 20 点(80 粒子),微分旋转:内慢外快 |
   | 生成答案 (working) | 青色 `#00E5FF` | 粒子折射(快速折线) |
   | sub-agent | 黄色(tool) | sub-agent 活动通过 `subagents:started` / `subagents:completed` / `subagents:failed` 信号复用 tool 动画 |
   | 减速 (wind-down) | 保持当前色 | 思考/工具/生成结束后的 1 秒 ease-out 减速,再回到空闲 |
