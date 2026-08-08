@@ -2,7 +2,11 @@
 
 [English](README.md) | [中文](README.zh.md)
 
-**Jarvis particle sphere for the [pi](https://github.com/earendil-works/pi-coding-agent) agent** — a particle-sphere overlay floating in the bottom-right corner of your pi terminal. It shifts color and animation with pi's live state — amber refraction while thinking, yellow clockwise curl-noise vortex during tool calls, cyan refraction while streaming the answer, and a denser pulse while TTS speaks — like a little assistant that's alive. Sub-agent activity (via [pi-subagents](https://github.com/tintinweb/pi-subagents)) also animates the sphere as the tool state.
+**Jarvis particle sphere for the [pi](https://github.com/earendil-works/pi-coding-agent) agent** — a particle-sphere overlay floating in the bottom-right corner of your pi terminal. It shifts color and animation with pi's live state — amber refraction while thinking, yellow clockwise particle ring during tool calls, cyan refraction while streaming the answer, and a denser pulse while TTS speaks — like a little assistant that's alive. Sub-agent activity (via [pi-subagents](https://github.com/tintinweb/pi-subagents)) also animates the sphere as the tool state.
+
+![demo](demo.svg)
+
+*Simulated four-state animation (SMIL SVG, generated from the actual render code — flow field / refraction / orbital particle ring)*
 
 ## ✨ Features
 

@@ -2,7 +2,11 @@
 
 [English](README.md) | [中文](README.zh.md)
 
-Pi agent 的 **Jarvis 粒子球**:一个悬浮在 pi 终端右下角的粒子球浮层。它会根据 pi 的实时状态变化颜色与动画 -- 思考时琥珀色折射折线、调用工具时黄色顺时针 curl noise 涡流、生成答案时青色快速折射、TTS 说话时脉冲,像一个小助手在"活"着。sub-agent 活动(通过 pi-subagents)也会像 tool 态一样让球动画。
+Pi agent 的 **Jarvis 粒子球**:一个悬浮在 pi 终端右下角的粒子球浮层。它会根据 pi 的实时状态变化颜色与动画 -- 思考时琥珀色折射折线、调用工具时黄色顺时针粒子环、生成答案时青色快速折射、TTS 说话时脉冲,像一个小助手在"活"着。sub-agent 活动(通过 pi-subagents)也会像 tool 态一样让球动画。
+
+![demo](demo.svg)
+
+*模拟四态动画(SMIL SVG,由真实渲染代码生成 -- 流场 / 折射 / 轨道粒子环)*
 
 ## ✨ 特性
 
