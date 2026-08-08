@@ -4,10 +4,10 @@
  * 一个 nonCapturing 浮动 overlay,渲染盲文粒子球。四种状态,固定颜色:
  *   - idle(绿): curl noise 慢流场 + 中心水波纹,静默 ~10FPS,说话 ~30FPS 脉冲。
  *   - think(红): 粒子折射(慢速折线,边界反射+内部随机折射),LLM 思考时。
- *   - tool (黄): curl noise 顺时针涡流(高速),工具调用时。
+ *   - tool (黄): 顺时针均匀粒子流(等角分布,中心留空,微分转速:内慢外快),工具调用时。
  *   - working(青): 粒子折射(快速折线),模型流式输出答案时。
  *
- * 渲染核心:idle/tool 用 curl noise 流场驱动持久化粒子(curl noise 是无散度
+ * 渲染核心:idle 用 curl noise 流场驱动持久化粒子(curl noise 是无散度
  * (divergence-free)速度场,粒子沿 noise 等高线形成长而扭转的流线,永不收敛
  * 到一点,产生流体涡旋感;粒子在圆内重生,生命周期 sin 渐变(首尾淡出))。
  * think/working 用粒子折射:粒子在圆内线性运动,遇边界反射、小概率内部
@@ -243,6 +243,8 @@ class JarvisSphereComponent implements Component {
 	private state: "idle" | "think" | "tool" | "working" = "idle";
 	// 粒子流方向: none(静止/idle) | cw | ccw | decel(1s 内 ease-out 减速)
 	private flow: "none" | "cw" | "ccw" | "decel" = "none";
+	private spin = 0; // 轨道粒子流累计角度(rad),tool 态用
+	private readonly SPIN_SPEED = 0.15; // 满速每 tick 角度增量(≈0.72 转/s;远低于 16 点距 22.5°,避免混叠,方向可辨)
 	private decelStart = 0; // 减速开始时间戳(ms)
 	private decelTarget: "idle" | "working" = "idle"; // 减速结束后的目标态
 	private decelDir = 1; // 减速前的流场方向(记忆 fieldDir,减速期间保持)
@@ -282,10 +284,9 @@ class JarvisSphereComponent implements Component {
 		this.tui.requestRender();
 	}
 
-	/** 工具调用开始 -> 顺时针黄色涡流 */
+	/** 工具调用开始 -> 顺时针黄色粒子流 */
 	onToolStart(): void {
 		if (this.state === "tool") return;
-		this.applyFieldParams("tool");
 		this.state = "tool";
 		this.flow = "cw";
 		this.decelStart = 0;
@@ -335,7 +336,7 @@ class JarvisSphereComponent implements Component {
 	private beginDecel(target: "idle" | "working" = "idle"): void {
 		if (this.flow === "decel") return; // 已在减速中,不重启(双信号防抖: tool_execution_end + subagents:completed)
 		this.decelTarget = target;
-		this.decelDir = this.fieldDir; // 记忆当前流场方向,减速期间保持
+		this.decelDir = this.flow === "ccw" ? -1 : 1; // 记忆当前旋转方向,减速期间保持
 		this.flow = "decel";
 		this.decelStart = Date.now();
 		this.tui.requestRender();
@@ -346,7 +347,6 @@ class JarvisSphereComponent implements Component {
 		const now = Date.now();
 
 		// 减速:1s 内 ease-out 速度降到 0,然后落到 decelTarget(idle 或 working)。
-		// 粒子 step 在 renderField 里用 fieldSpeed * velFactor * decelDir 推进。
 		if (this.flow === "decel") {
 			const tt = (now - this.decelStart) / 1000;
 			if (tt >= 1) {
@@ -355,14 +355,18 @@ class JarvisSphereComponent implements Component {
 				if (this.decelTarget === "working") this.flow = "cw";
 				else this.flow = "none";
 				this.decelStart = 0;
+			} else {
+				// 轨道粒子流(tool):减速期间 spin 也减速推进(ease-out)
+				this.spin += this.SPIN_SPEED * this.decelDir * (1 - tt) ** 2;
 			}
 			this.tui.requestRender();
 			return;
 		}
 
-		// 粒子流(think/tool/working):stepParticles 在 renderField 里推进,
-		// tick 只负责请求重绘(30FPS)。
+		// 粒子流(think/tool/working):tool 轨道推进 spin;折射态(think/working)
+		// tick 只负责请求重绘(30FPS),粒子在 renderRefract 里推进。
 		if (this.flow === "cw" || this.flow === "ccw") {
+			this.spin += this.flow === "cw" ? this.SPIN_SPEED : -this.SPIN_SPEED;
 			this.tui.requestRender();
 			return;
 		}
@@ -386,11 +390,13 @@ class JarvisSphereComponent implements Component {
 						: WORKING_COLOR;
 		const open = `\x1b[38;2;${r};${g};${b}m`;
 		const close = "\x1b[0m";
-		// think/working -> 粒子折射;idle/tool -> curl noise 流场(tool 为顺时针高速涡流)
+		// tool -> 轨道粒子流(顺时针,中心留空,内慢外快);think/working -> 折射;idle -> curl noise 流场
 		const raw =
-			this.state === "think" || this.state === "working"
-				? this.renderRefract(width)
-				: this.renderField(width);
+			this.state === "tool"
+				? this.renderOrbital(width)
+				: this.state === "think" || this.state === "working"
+					? this.renderRefract(width)
+					: this.renderField(width);
 		return raw.map((line) => `${open}${line}${close}`);
 	}
 
@@ -406,20 +412,58 @@ class JarvisSphereComponent implements Component {
 			case "think":
 				this.refractSpeed = 1.04; // 折射
 				break;
-			case "tool":
-				this.fieldSpeed = 0.22;
-				this.fieldDir = 1;
-				this.fieldCount = 85;
-				this.fieldScroll = 0.05; // 顺时针高速流场（早期参数）
-				break;
 			case "working":
 				this.refractSpeed = 1.04; // 快速折射
 				break;
 		}
 	}
 
-	/** 初始化/调节粒子数:首次在圆内均匀分布;后续按 targetN 增减 */
-	private ensureParticles(
+	/** tool 态:均匀粒子流(等角分布 + 微分转速:内慢外快,中心留空),方向由 flow 决定 */
+	private renderOrbital(width: number): string[] {
+		const w = Math.max(8, width);
+		const rows = Math.max(4, Math.round(w / 2));
+		const dotCols = w * 2;
+		const dotRows = rows * 4;
+		const cx = dotCols / 2;
+		const cy = dotRows / 2;
+		const R = Math.min(dotCols, dotRows) / 2 - 1;
+
+		const codes: number[] = new Array(rows * w).fill(BRAILLE_BASE);
+		const setDot = (px: number, py: number) => {
+			const dx = Math.round(px);
+			const dy = Math.round(py);
+			if (dx < 0 || dy < 0 || dx >= dotCols || dy >= dotRows) return;
+			const col = Math.floor(dx / 2);
+			const row = Math.floor(dy / 4);
+			codes[row * w + col] |= BRAILLE_BITS[dy % 4][dx % 2];
+		};
+
+		// 均匀粒子流:3 层等间距半径,每层 16 个等角分布点;中心留空。
+		// 角速度 = spin × (r/R):靠内慢、靠外快(微分旋转);方向由 spin 累计方向决定。
+		const R_in = R * 0.55;
+		const R_out = R * 0.95;
+		const LAYERS = 3;
+		const PER_LAYER = 16;
+		const GAP = 3; // 缺口:每层去掉连续 GAP 个角度(≈67°),打破对称,旋转方向一眼可辨
+		for (let l = 0; l < LAYERS; l++) {
+			const r = R_in + ((R_out - R_in) * l) / (LAYERS - 1);
+			for (let k = 0; k < PER_LAYER - GAP; k++) {
+				const a = (k / PER_LAYER) * 2 * Math.PI + this.spin * (r / R);
+				setDot(cx + r * Math.cos(a), cy + r * Math.sin(a));
+			}
+		}
+
+		const lines: string[] = [];
+		for (let row = 0; row < rows; row++) {
+			let line = "";
+			for (let col = 0; col < w; col++)
+				line += String.fromCharCode(codes[row * w + col]);
+			lines.push(line);
+		}
+		return lines;
+	}
+
+	/** 初始化/调节粒子数:首次在圆内均匀分布;后续按 targetN 增减 */	private ensureParticles(
 		cx: number,
 		cy: number,
 		R: number,
