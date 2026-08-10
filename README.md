@@ -53,6 +53,44 @@ ln -s ~/github/pi-jarvis-sphere ~/.pi/agent/extensions/pi-jarvis-sphere
 { "enabled": true }
 ```
 
+## 🧩 Plugin Architecture
+
+Each animation lives in its own plugin file (closure-owned particle state) behind a unified interface; **the scene → animation mapping is driven by `config.json` — swap animations by editing config, no code changes**.
+
+```
+animations/          # animation plugins (new animation = new file + one registry line)
+  flow-field.ts      # flow field + water ripple (idle default)
+  refract.ts         # refraction particles (think/working default; separate instance per scene)
+  orbital.ts         # orbital particle ring (tool default)
+  registry.ts        # id -> factory registry
+lib/                 # shared layer: types / grid geometry / braille primitives / noise / scene config
+config.json          # your editable "plugin catalog"
+```
+
+The `scenes` field of `config.json` controls which animation each scene mounts and its parameters:
+
+```json
+{
+  "enabled": true,
+  "scenes": {
+    "idle":    { "animation": "flow-field", "params": { "fieldSpeed": 0.06, "dir": 1, "fieldCount": 120, "fieldScroll": 0.02 } },
+    "think":   { "animation": "refract",    "params": { "refractSpeed": 1.04, "refractCount": 16 } },
+    "tool":    { "animation": "orbital",    "params": { "spinSpeed": 0.15, "dir": 1 } },
+    "working": { "animation": "refract",    "params": { "refractSpeed": 1.04, "refractCount": 16 } }
+  }
+}
+```
+
+**Example — plug the "particle ring" (orbital) into the think scene:** change one line of `config.json`:
+
+```json
+"think": { "animation": "orbital", "params": { "spinSpeed": 0.15, "dir": 1 } },
+```
+
+Then `/reload` in pi. Missing params fall back to each plugin's `defaults`; `dir` controls rotation (`1` = clockwise / `-1` = counter-clockwise).
+
+> Note: think and working are independent animation slots — you can mount different animations per scene; the same animation in multiple scenes holds separate particle instances (no interference).
+
 ## 🧪 Development & Debugging
 
 - After editing, `/reload` in pi hot-reloads (jiti runs `.ts` directly — no build step).

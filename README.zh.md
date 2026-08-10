@@ -53,6 +53,44 @@ ln -s ~/github/pi-jarvis-sphere ~/.pi/agent/extensions/pi-jarvis-sphere
 { "enabled": true }
 ```
 
+## 🧩 动画插件化
+
+每个动画是独立插件文件(闭包自持粒子状态),通过统一接口接入;**场景 → 动画的映射由 `config.json` 驱动,改配置即换动画,不用碰代码**。
+
+```
+animations/          # 动画插件目录(新增动画 = 建文件 + registry 登记一行)
+  flow-field.ts      # 流场 + 水波纹(idle 默认)
+  refract.ts         # 折射粒子(think/working 默认,每场景独立实例)
+  orbital.ts         # 轨道粒子流(tool 默认)
+  registry.ts        # 注册表:id -> 工厂
+lib/                 # 共享层:类型 / 网格几何 / 盲文原语 / noise / 场景配置解析
+config.json          # 你的可编辑"插件目录"
+```
+
+`config.json` 的 `scenes` 字段控制每个场景挂哪个动画、参数如何调:
+
+```json
+{
+  "enabled": true,
+  "scenes": {
+    "idle":    { "animation": "flow-field", "params": { "fieldSpeed": 0.06, "dir": 1, "fieldCount": 120, "fieldScroll": 0.02 } },
+    "think":   { "animation": "refract",    "params": { "refractSpeed": 1.04, "refractCount": 16 } },
+    "tool":    { "animation": "orbital",    "params": { "spinSpeed": 0.15, "dir": 1 } },
+    "working": { "animation": "refract",    "params": { "refractSpeed": 1.04, "refractCount": 16 } }
+  }
+}
+```
+
+**例:把"粒子流"(orbital)插到 think 场景**——只改一行 `config.json`:
+
+```json
+"think": { "animation": "orbital", "params": { "spinSpeed": 0.15, "dir": 1 } },
+```
+
+改完 `/reload` 生效。参数缺省时用插件自身 `defaults` 兜底;`dir` 控制旋转方向(`1`=顺时针 / `-1`=逆时针)。
+
+> 注:think 与 working 是独立动画槽位,可分别配不同动画;同一动画在多个场景各自持有独立粒子实例(互不干扰)。
+
 ## 🧪 开发与调试
 
 - 改完代码在 pi 里 `/reload` 即可热加载(jiti 直接跑 `.ts`,无构建步骤)。

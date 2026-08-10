@@ -1,0 +1,35 @@
+{
+  "enabled": true,
+  "scenes": {
+    "idle": {
+      "animation": "flow-field",
+      "params": {
+        "fieldSpeed": 0.06,
+        "dir": 1,
+        "fieldCount": 120,
+        "fieldScroll": 0.02
+      }
+    },
+    "think": {
+      "animation": "refract",
+      "params": {
+        "refractSpeed": 1.04,
+        "refractCount": 16
+      }
+    },
+    "tool": {
+      "animation": "orbital",
+      "params": {
+        "spinSpeed": 0.15,
+        "dir": 1
+      }
+    },
+    "working": {
+      "animation": "refract",
+      "params": {
+        "refractSpeed": 1.04,
+        "refractCount": 16
+      }
+    }
+  }
+}

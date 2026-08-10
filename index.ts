@@ -1,7 +1,7 @@
 /**
  * Jarvis 粒子球浮层 for Pi
  *
- * 一个 nonCapturing 浮动 overlay,渲染盲文粒子球。四种状态,固定颜色:
+ * 一个 nonCapturing 浮动 overlay,渲染盲文粒子球。四种状态,颜色随主题自适应:
  *   - idle(绿): curl noise 慢流场 + 中心水波纹,静默 ~10FPS,说话 ~30FPS 脉冲。
  *   - think(红): 粒子折射(慢速折线,边界反射+内部随机折射),LLM 思考时。
  *   - tool (黄): 顺时针均匀粒子流(等角分布,中心留空,微分转速:内慢外快),工具调用时。
@@ -15,8 +15,13 @@
  *
  * 状态结束后:粒子流在 1s 内 ease-out 减速回 idle(agent_end 收尾)或 working
  * (think/tool 结束、模型接着输出答案);期间若有新事件直接跳到新状态,
- * 跳过减速动画。状态切换时只调 field 参数(fieldSpeed/fieldDir/fieldCount/
- * fieldScroll),不重建粒子,保证平滑过渡。
+ * 跳过减速动画。
+ *
+ * 动画插件化:每个动画(流场/折射/轨道)是独立插件(animations/*.ts),通过统一
+ * AnimationPlugin 接口暴露(闭包持有自己的粒子状态);宿主(本文件)瘦身为状态机 +
+ * 槽位调度器,场景 -> 动画由 config.json 的 scenes 映射驱动(改配置即换动画,
+ * think/working 为独立动画槽位)。新增动画 = 新建 animations/xxx.ts + registry 登记一行。
+ * 换动画 = 改 config.json 的 scenes[scene].animation,不用碰代码。
  *
  * 信号源:
  *   - TTS: pi-ext-tts-mimo 发出的 pi.events "tts:started"/"tts:stopped"
@@ -30,35 +35,256 @@
  *   (session_start 挂浮层、pi.events 订阅、session_shutdown 清理)。
  */
 
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
+	Theme,
 } from "@earendil-works/pi-coding-agent";
 import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
+import { computeGrid } from "./lib/geometry.ts";
+import type {
+	AnimationHost,
+	AnimationPlugin,
+	FlowDir,
+	Grid,
+	SceneId,
+	SceneParams,
+} from "./lib/types.ts";
+import {
+	DEFAULT_SCENES,
+	mergeSceneParams,
+	resolveSceneAnimation,
+	sanitizeScenesConfig,
+} from "./lib/scenes.ts";
+import type { ScenesConfig } from "./lib/scenes.ts";
+import { getAnimationFactory } from "./animations/registry.ts";
 
 const CONFIG_FILE = join(__dirname, "config.json");
 // overlay 列宽;盲文每格 2 点列 => 28 点宽,与 7 行(28 点高)配成方形球
 const WIDTH = 14;
 
-// 四态固定色(用户选定):idle 绿 / think 红 / tool 黄 / working 青
-const IDLE_COLOR: [number, number, number] = [0x00, 0xe6, 0x76];
-const THINK_COLOR: [number, number, number] = [0xff, 0xab, 0x00];
-const TOOL_COLOR: [number, number, number] = [0xff, 0xeb, 0x3b];
-const WORKING_COLOR: [number, number, number] = [0x00, 0xe5, 0xff];
+// 双调色板:dark(默认,高饱和亮色)/ light(深色变体,保证白底对比度)
+// 四态: idle 绿 / think 红 / tool 黄 / working 青
+const DARK_PALETTE = {
+	idle: [0x00, 0xe6, 0x76], // 绿
+	think: [0xff, 0xab, 0x00], // 琥珀
+	tool: [0xff, 0xeb, 0x3b], // 黄
+	working: [0x00, 0xe5, 0xff], // 青
+};
+// light 主题:中明度高饱和(深浊色在浅底上像灰点,色相丢失;鲜亮色对比度 3:1+ 且一眼可辨)
+const LIGHT_PALETTE = {
+	idle: [0x00, 0x96, 0x5a], // 鲜绿
+	think: [0xe8, 0x53, 0x0a], // 鲜橙
+	tool: [0xa8, 0x84, 0x00], // 金黄
+	working: [0x00, 0x8a, 0xa3], // 鲜青
+};
+
+// 判断当前主题是否为 light:内置主题看 name;自定义主题解析背景色亮度
+function isLightTheme(theme: Theme): boolean {
+	if (theme.name === "light") return true;
+	if (theme.name === "dark") return false;
+	// 自定义主题:解析 selectedBg 的 ANSI truecolor 前缀
+	try {
+		const ansi = theme.getBgAnsi("selectedBg");
+		const m = ansi.match(/\x1b\[48;2;(\d+);(\d+);(\d+)m/);
+		if (m) {
+			const lum =
+				(0.299 * Number(m[1]) + 0.587 * Number(m[2]) + 0.114 * Number(m[3])) /
+				255;
+			return lum > 0.5;
+		}
+	} catch {
+		// 主题未初始化等 => 默认 dark
+	}
+	return false;
+}
+
+// 解析 "#rgb" / "#rrggbb" 十六进制颜色 => [r,g,b] 0-255;失败返回 null
+function hexToRgb(hex: string): [number, number, number] | null {
+	const m = hex.trim().match(/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i);
+	if (!m) return null;
+	const h = m[1];
+	if (h.length === 3) {
+		return [
+			parseInt(h[0] + h[0], 16),
+			parseInt(h[1] + h[1], 16),
+			parseInt(h[2] + h[2], 16),
+		];
+	}
+	return [
+		parseInt(h.slice(0, 2), 16),
+		parseInt(h.slice(2, 4), 16),
+		parseInt(h.slice(4, 6), 16),
+	];
+}
+
+// 相对亮度(0-1,WCAG 线性化):0.2126R + 0.7152G + 0.0722B
+function relLum(hex: string): number {
+	const rgb = hexToRgb(hex);
+	if (!rgb) return 0;
+	const weights = [0.2126, 0.7152, 0.0722];
+	let lum = 0;
+	for (let i = 0; i < 3; i++) {
+		let c = rgb[i] / 255;
+		c = c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+		lum += weights[i] * c;
+	}
+	return lum;
+}
+
+// 四态调色板类型:每态 [r,g,b] 0-255
+// 从当前主题 JSON 的 vars 提取四态颜色:success→idle、warning→think、
+// accent→tool、link→working。统一解析:先读 colors[slot],以 "#" 开头则直接用,
+// 否则视为 vars 键名取值;取不到再试 vars[slot] 本身。resolve 变参依次尝试候选槽位
+// (link 缺失时用内置主题的 blue/teal 兜底)。四色任一最终为 null => 整体 null(调用方回退)。
+// 浅色背景(relLum(bg) > 0.5)下把四色各通道乘 0.55 压暗(保色相,满足"要很深")。
+type Palette = {
+	idle: [number, number, number];
+	think: [number, number, number];
+	tool: [number, number, number];
+	working: [number, number, number];
+};
+
+// 主题文件缓存:sourcePath + mtime 命中则直接返回同一对象引用。
+// 目的:1) tick 轮询里 palette !== prev 引用比较在主题未变时恢复为 false,避免
+//    每 500ms 无条件 requestRender;2) 避免每 500ms 同步读盘。
+// 仅缓存成功结果;解析失败(return null)时同步清空,防止缓存旧值。
+
+let themeCachePath: string | null = null;
+let themeCacheMtime = 0;
+let themeCacheResult: Palette | null = null;
+
+function readThemePalette(theme: Theme): Palette | null {
+	if (!theme.sourcePath) return null; // 无 sourcePath 不进缓存(缓存键是 path 字符串)
+	try {
+		const st = statSync(theme.sourcePath);
+		if (themeCachePath === theme.sourcePath && themeCacheMtime === st.mtimeMs) {
+			return themeCacheResult;
+		}
+		themeCachePath = theme.sourcePath;
+		themeCacheMtime = st.mtimeMs;
+	} catch {
+		// stat 失败(文件被删等)=> 走正常解析,失败回退
+	}
+
+	let parsed: {
+		vars?: Record<string, string>;
+		colors?: Record<string, string>;
+	};
+	try {
+		parsed = JSON.parse(readFileSync(theme.sourcePath, "utf8"));
+	} catch {
+		themeCacheResult = null;
+		return null;
+	}
+	// JSON 合法但非对象(如文本 "null"/数字/字符串)=> 无 vars/colors 可读,整体回退
+	if (!parsed || typeof parsed !== "object") {
+		themeCacheResult = null;
+		return null;
+	}
+	const vars = parsed.vars ?? {};
+	const colors = parsed.colors ?? {};
+
+	// 统一解析:colors[slot] => (#hex 直接用 | vars 键名) => vars[slot] 兜底;
+	// 变参依次尝试多个候选槽位,返回第一个成功的 hex。所有取值都用
+	// typeof === "string" 守卫,防止 JSON 里混入 null/数字/对象时 .startsWith 抛 TypeError。
+	const resolve = (...slots: string[]): string | null => {
+		for (const slot of slots) {
+			const direct = colors[slot];
+			if (typeof direct === "string") {
+				if (direct.startsWith("#")) {
+					if (hexToRgb(direct)) return direct;
+				} else {
+					// 非 # 开头 => 视为 vars 键名,取 vars[direct]
+					const viaVar = vars[direct];
+					if (
+						typeof viaVar === "string" &&
+						viaVar.startsWith("#") &&
+						hexToRgb(viaVar)
+					) {
+						return viaVar;
+					}
+				}
+			}
+			const fallback = vars[slot];
+			if (
+				typeof fallback === "string" &&
+				fallback.startsWith("#") &&
+				hexToRgb(fallback)
+			) {
+				return fallback;
+			}
+		}
+		return null;
+	};
+
+	const hexes: Record<"idle" | "think" | "tool" | "working", string | null> = {
+		idle: resolve("success"),
+		think: resolve("warning"),
+		tool: resolve("accent"),
+		working: resolve("link", "blue", "teal", "accent"), // link 缺失 => 内置主题 blue/teal 兜底,再不行才 accent
+	};
+	const out: Palette = {
+		idle: [0, 0, 0],
+		think: [0, 0, 0],
+		tool: [0, 0, 0],
+		working: [0, 0, 0],
+	};
+	for (const key of Object.keys(hexes) as Array<
+		"idle" | "think" | "tool" | "working"
+	>) {
+		const hex = hexes[key];
+		if (!hex) {
+			themeCacheResult = null;
+			return null;
+		}
+		const rgb = hexToRgb(hex);
+		if (!rgb) {
+			themeCacheResult = null;
+			return null;
+		}
+		out[key] = rgb;
+	}
+
+	// 背景色:同法解析 bg,没有则用 selectedBg 兜底,都没有 => 默认黑
+	const bg = resolve("bg", "selectedBg") ?? "#000000";
+
+	// 浅底压暗:各通道乘 0.55 取整,保色相
+	if (relLum(bg) > 0.5) {
+		for (const key of Object.keys(out) as Array<
+			"idle" | "think" | "tool" | "working"
+		>) {
+			const [r, g, b] = out[key];
+			out[key] = [
+				Math.round(r * 0.55),
+				Math.round(g * 0.55),
+				Math.round(b * 0.55),
+			];
+		}
+	}
+
+	const result: Palette = { ...out };
+	themeCacheResult = result;
+	return result;
+}
 
 interface JarvisConfig {
 	enabled: boolean;
+	/** 场景 -> 动画 覆盖项(config.json 只存覆盖,缺省走 DEFAULT_SCENES 兜底) */
+	scenes: ScenesConfig;
 }
-const DEFAULT_CONFIG: JarvisConfig = { enabled: true };
-const config: JarvisConfig = { ...DEFAULT_CONFIG };
+const DEFAULT_CONFIG: JarvisConfig = { enabled: true, scenes: {} };
+const config: JarvisConfig = { enabled: true, scenes: {} };
 
 function loadConfig(): void {
 	try {
 		if (existsSync(CONFIG_FILE)) {
 			const data = JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
 			config.enabled = data.enabled ?? DEFAULT_CONFIG.enabled;
+			// 只收合法覆盖项:动画 id 为 string,参数只收有限 number(sanitizeScenesConfig)
+			config.scenes = sanitizeScenesConfig(data.scenes);
 		}
 	} catch {
 		// 配置缺失/损坏 => 用默认值
@@ -67,200 +293,60 @@ function loadConfig(): void {
 loadConfig();
 
 // ---------------------------------------------------------------------------
-// 盲文粒子球组件
+// 盲文粒子球组件(宿主)
 // ---------------------------------------------------------------------------
 
-// 每个 cell = 2 列 × 4 行点阵;Unicode 盲文码位掩码 [行][列]
-const BRAILLE_BITS = [
-	[0x01, 0x08],
-	[0x02, 0x10],
-	[0x04, 0x20],
-	[0x40, 0x80],
-];
-const BRAILLE_BASE = 0x2800;
-
-// --- curl noise 流场:整数哈希 -> 值噪声 -> 无散度速度场 ---
-
-// 整数格点哈希 -> [0,1)
-function hash2(x: number, y: number): number {
-	let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263)) | 0;
-	h = Math.imul(h ^ (h >>> 13), 1274126177) | 0;
-	return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+// 场景 -> 旋转方向:由该场景合并后的 params.dir 换算(-1=ccw / 1=cw / 其他=none)
+function flowDirFromParams(params: Readonly<SceneParams>): FlowDir {
+	const dir = params.dir;
+	if (dir === -1) return "ccw";
+	if (dir === 1) return "cw";
+	return "none";
 }
 
-// 2D 值噪声:整数格点 smoothstep 双线性插值,返回 [0,1)
-function valueNoise(x: number, y: number): number {
-	const xi = Math.floor(x),
-		yi = Math.floor(y);
-	const xf = x - xi,
-		yf = y - yi;
-	const u = xf * xf * (3 - 2 * xf);
-	const v = yf * yf * (3 - 2 * yf);
-	const a = hash2(xi, yi);
-	const b = hash2(xi + 1, yi);
-	const c = hash2(xi, yi + 1);
-	const d = hash2(xi + 1, yi + 1);
-	return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+interface Slot {
+	plugin: AnimationPlugin;
 }
 
-// 2D curl of scalar noise -> divergence-free 速度场 [vx, vy]
-// 梯度 (dX,dY) 旋转 90° = (dY, -dX)
-function curl2D(x: number, y: number, delta: number): [number, number] {
-	const dX =
-		(valueNoise(x + delta, y) - valueNoise(x - delta, y)) / (2 * delta);
-	const dY =
-		(valueNoise(x, y + delta) - valueNoise(x, y - delta)) / (2 * delta);
-	return [dY, -dX];
-}
-
-// 流场粒子:dot 网格连续坐标 + 生命周期
-interface Particle {
-	x: number;
-	y: number;
-	age: number;
-	life: number;
-}
-
-// --- 折射粒子:圆内运动,边界反射+内部随机折射,折线连成光线感(think/working) ---
-
-interface RefractParticle {
-	px: number;
-	py: number; // 当前位置(dot 网格坐标)
-	vx: number;
-	vy: number; // 单位方向向量
-	pts: number[]; // 折射点 flat 坐标 [x0,y0,x1,y1,...]
-	bounces: number; // 已折射次数
-	maxBounces: number; // 3-6 随机
-}
-
-const REFRACT_COUNT = 16;
-
-// 生成/重生折射粒子:圆内随机位置 + 随机单位方向,折线点重置
-function spawnRefract(
-	p: RefractParticle,
-	cx: number,
-	cy: number,
-	R: number,
-): void {
-	// 圆内均匀随机位置(√rand 保证面积均匀)
-	const a = Math.random() * 6.2831853;
-	const r = Math.sqrt(Math.random()) * R * 0.6;
-	p.px = cx + r * Math.cos(a);
-	p.py = cy + r * Math.sin(a);
-	const d = Math.random() * 6.2831853;
-	p.vx = Math.cos(d);
-	p.vy = Math.sin(d);
-	p.pts = [p.px, p.py];
-	p.bounces = 0;
-	p.maxBounces = 3 + ((Math.random() * 4) | 0); // 3,4,5,6
-}
-
-// 推进折射粒子一步:线性位移;出界 => 圆边界反射;小概率 => 内部随机折射
-function stepRefract(
-	p: RefractParticle,
-	cx: number,
-	cy: number,
-	R: number,
-	speed: number,
-): void {
-	p.px += p.vx * speed;
-	p.py += p.vy * speed;
-	// 圆边界反射:法线 = (粒子-圆心).normalize
-	const dx = p.px - cx,
-		dy = p.py - cy;
-	const d2 = dx * dx + dy * dy;
-	if (d2 > R * R) {
-		const d = Math.sqrt(d2);
-		const nx = dx / d,
-			ny = dy / d;
-		const dot = p.vx * nx + p.vy * ny;
-		p.vx -= 2 * dot * nx;
-		p.vy -= 2 * dot * ny;
-		p.px = cx + nx * R * 0.97;
-		p.py = cy + ny * R * 0.97;
-		p.pts.push(p.px, p.py);
-		p.bounces++;
-		if (p.bounces >= p.maxBounces) spawnRefract(p, cx, cy, R);
-	} else if (Math.random() < 0.02) {
-		// 随机内部折射:±~70° 偏转
-		const ang = (Math.random() - 0.5) * 2.4;
-		const c = Math.cos(ang),
-			s = Math.sin(ang);
-		const nvx = p.vx * c - p.vy * s;
-		const nvy = p.vx * s + p.vy * c;
-		p.vx = nvx;
-		p.vy = nvy;
-		p.pts.push(p.px, p.py);
-		p.bounces++;
-		if (p.bounces >= p.maxBounces) spawnRefract(p, cx, cy, R);
-	}
-}
-
-// Bresenham 画线:在盲文 codes 数组上画 (x0,y0)->(x1,y1) 线段
-function lineDot(
-	codes: number[],
-	w: number,
-	dotCols: number,
-	dotRows: number,
-	x0: number,
-	y0: number,
-	x1: number,
-	y1: number,
-): void {
-	let x = Math.round(x0),
-		y = Math.round(y0);
-	const ex = Math.round(x1),
-		ey = Math.round(y1);
-	const adx = Math.abs(ex - x),
-		ady = Math.abs(ey - y);
-	const sx = x < ex ? 1 : -1,
-		sy = y < ey ? 1 : -1;
-	let err = adx - ady;
-	while (true) {
-		if (x >= 0 && y >= 0 && x < dotCols && y < dotRows) {
-			codes[(y >> 2) * w + (x >> 1)] |= BRAILLE_BITS[y & 3][x & 1];
-		}
-		if (x === ex && y === ey) break;
-		const e2 = 2 * err;
-		if (e2 > -ady) {
-			err -= ady;
-			x += sx;
-		}
-		if (e2 < adx) {
-			err += adx;
-			y += sy;
-		}
-	}
+/** 兜底插件:factory 抛错或未注册时渲染空帧,不让异常冒泡崩 TUI 渲染管线 */
+function makeEmptyPlugin(): AnimationPlugin {
+	return {
+		id: "__empty__",
+		render(grid: Grid, _host: AnimationHost): string[] {
+			return new Array(grid.rows).fill(" ".repeat(grid.w));
+		},
+	};
 }
 
 class JarvisSphereComponent implements Component {
 	private tui: TUI;
+	private theme: Theme; // 实时代理:任意时刻读 name/getBgAnsi 都是当前主题
+	// 四态颜色唯一色源:默认 DARK_PALETTE,syncTheme 时从主题 vars 提取,失败回退亮暗调色板
+	// (DARK/LIGHT_PALETTE 推断为 number[],故字段用 number[] 以兼容回退常量)
+	private palette: {
+		idle: number[];
+		think: number[];
+		tool: number[];
+		working: number[];
+	} = DARK_PALETTE;
+	private themeCheckAt = 0; // 主题轮询保底:上次检查时间戳(ms)
 	private interval: ReturnType<typeof setInterval> | null = null;
 	private phase = 0;
 	private frame = 0;
 	speaking = false;
-	// 四态: idle(绿/水波纹) | think(红/逆时针流) | tool(黄/顺时针流) | working(青/顺时针流)
-	private state: "idle" | "think" | "tool" | "working" = "idle";
-	// 粒子流方向: none(静止/idle) | cw | ccw | decel(1s 内 ease-out 减速)
-	private flow: "none" | "cw" | "ccw" | "decel" = "none";
-	private spin = 0; // 轨道粒子流累计角度(rad),tool 态用
-	private readonly SPIN_SPEED = 0.15; // 满速每 tick 角度增量(≈0.72 转/s;远低于 16 点距 22.5°,避免混叠,方向可辨)
-	private decelStart = 0; // 减速开始时间戳(ms)
-	private decelTarget: "idle" | "working" = "idle"; // 减速结束后的目标态
-	private decelDir = 1; // 减速前的流场方向(记忆 fieldDir,减速期间保持)
-	// curl noise 流场粒子系统(持久化,状态切换时只调参不重建)
-	private particles: Particle[] = [];
-	private fieldSpeed = 0.06; // 粒子位移系数(每 step)
-	private fieldDir = 1; // 1=顺时针(curl 正方向), -1=逆时针
-	private fieldCount = 120; // 目标粒子数
-	private fieldScroll = 0.02; // 噪声场平移速度(流场演变,避免静态)
-	// 折射粒子系统(think/working 态):圆内运动,边界反射+内部随机折射,折线渲染
-	private refractParticles: RefractParticle[] = [];
-	private refractSpeed = 1.04; // 折射位移系数
-	private velFactor = 1; // 减速 ease-out 系数(1=全速,0=停止),renderRefract 用
+	// 四态: idle(绿/水波纹) | think(红/折射) | tool(黄/轨道粒子流) | working(青/折射)
+	private state: SceneId = "idle";
+	// 场景 -> 动画实例(插件槽位):懒建,切走不销毁、切回续帧;同一动画多场景各自独立实例
+	private slots = new Map<SceneId, Slot>();
+	// 减速过渡:ease-out 1s 后落到 decelTarget;期间状态仍是源场景,方向冻结为 decelFlowDir
+	private decelStart = 0; // 减速开始时间戳(ms);0 = 非减速
+	private decelTarget: "idle" | "working" = "idle";
+	private decelFlowDir: FlowDir = "none"; // 减速前方向,减速期间保持
 
-	constructor(tui: TUI) {
+	constructor(tui: TUI, theme: Theme) {
 		this.tui = tui;
+		this.theme = theme;
+		this.syncTheme();
 		// ~30FPS 基础节拍;idle 时每 3 帧才推进+重绘(=> ~10FPS),省 CPU
 		this.interval = setInterval(() => this.tick(), 33);
 	}
@@ -274,30 +360,23 @@ class JarvisSphereComponent implements Component {
 		}
 	}
 
-	/** LLM 开始思考 -> 逆时针红色涡流 */
+	/** LLM 开始思考 -> think 场景 */
 	onThinkingStart(): void {
 		if (this.state === "think") return;
-		this.applyFieldParams("think");
-		this.state = "think";
-		this.flow = "ccw";
-		this.decelStart = 0;
-		this.tui.requestRender();
+		this.jumpTo("think");
 	}
 
-	/** 工具调用开始 -> 顺时针黄色粒子流 */
+	/** 工具调用开始 -> tool 场景 */
 	onToolStart(): void {
 		if (this.state === "tool") return;
-		this.state = "tool";
-		this.flow = "cw";
-		this.decelStart = 0;
-		this.tui.requestRender();
+		this.jumpTo("tool");
 	}
 
-	/** 答案流开始(text_delta 首帧) -> 顺时针青色涡流;幂等:仅在状态切换时生效 */
+	/** 答案流开始(text_delta 首帧) -> working 场景;幂等:仅在状态切换时生效 */
 	onTextDelta(): void {
 		// 减速中:跳过剩余减速直接跳 working(established rule:新事件直达新状态);
 		// 非减速:仅当已处于活跃的 think/tool/working 流时才 no-op。
-		if (this.flow !== "decel") {
+		if (this.decelStart === 0) {
 			if (
 				this.state === "think" ||
 				this.state === "tool" ||
@@ -305,11 +384,7 @@ class JarvisSphereComponent implements Component {
 			)
 				return;
 		}
-		this.applyFieldParams("working");
-		this.state = "working";
-		this.flow = "cw";
-		this.decelStart = 0;
-		this.tui.requestRender();
+		this.jumpTo("working");
 	}
 
 	/** LLM 结束思考 -> 1s 内减速;结束后模型流式输出答案 -> working(青/顺时针) */
@@ -325,7 +400,7 @@ class JarvisSphereComponent implements Component {
 	/** 异常安全网(agent_end):若仍在流动(结束事件丢失)也走减速收尾回 idle */
 	abortThinking(): void {
 		if (this.state === "idle") return;
-		if (this.flow === "decel") {
+		if (this.decelStart !== 0) {
 			// 减速中(think/tool 结束的 1s 窗口内):把落点改回 idle,避免落到 working 永转
 			this.decelTarget = "idle";
 			return;
@@ -333,40 +408,82 @@ class JarvisSphereComponent implements Component {
 		this.beginDecel("idle");
 	}
 
+	/** 直接切场景:取消减速,跳过过渡动画 */
+	private jumpTo(scene: SceneId): void {
+		this.state = scene;
+		this.decelStart = 0;
+		this.decelFlowDir = "none";
+		this.tui.requestRender();
+	}
+
 	private beginDecel(target: "idle" | "working" = "idle"): void {
-		if (this.flow === "decel") return; // 已在减速中,不重启(双信号防抖: tool_execution_end + subagents:completed)
+		if (this.decelStart !== 0) return; // 已在减速中,不重启(双信号防抖: tool_execution_end + subagents:completed)
 		this.decelTarget = target;
-		this.decelDir = this.flow === "ccw" ? -1 : 1; // 记忆当前旋转方向,减速期间保持
-		this.flow = "decel";
+		// 记忆当前旋转方向(由该场景合并参数换算),减速期间保持
+		this.decelFlowDir = flowDirFromParams(this.mergedParams(this.state));
 		this.decelStart = Date.now();
 		this.tui.requestRender();
+	}
+
+	/** 取场景的合并参数:插件 defaults 兜底 + config.scenes[scene].params 覆盖 */
+	private mergedParams(scene: SceneId): Readonly<SceneParams> {
+		return mergeSceneParams(
+			config.scenes,
+			scene,
+			this.slotFor(scene).plugin.defaults ?? {},
+		);
+	}
+
+	/** 取场景对应的动画实例(懒建并缓存;未注册/未配置 -> DEFAULT_SCENES 兜底) */
+	private slotFor(scene: SceneId): Slot {
+		let slot = this.slots.get(scene);
+		if (!slot) {
+			const id = resolveSceneAnimation(config.scenes, scene);
+			let plugin: AnimationPlugin;
+			try {
+				const factory =
+					getAnimationFactory(id) ?? getAnimationFactory(DEFAULT_SCENES[scene]);
+				plugin = factory ? factory() : makeEmptyPlugin();
+			} catch {
+				// 插件初始化异常:渲染空帧,避免崩掉整个浮层
+				plugin = makeEmptyPlugin();
+			}
+			slot = { plugin };
+			this.slots.set(scene, slot);
+		}
+		return slot;
 	}
 
 	private tick(): void {
 		this.frame++;
 		const now = Date.now();
 
+		// 主题轮询保底(双保险):invalidate 是官方路径,这里每 ~500ms 兜底一次,
+		// 防止个别主题切换路径漏调 invalidate。
+		if (now - this.themeCheckAt >= 500) {
+			this.themeCheckAt = now;
+			const prev = this.palette;
+			this.syncTheme(); // 主题切换时刷新四态调色板(内部处理回退)
+			if (this.palette !== prev) {
+				this.tui.requestRender();
+			}
+		}
+
 		// 减速:1s 内 ease-out 速度降到 0,然后落到 decelTarget(idle 或 working)。
-		if (this.flow === "decel") {
+		// 期间渲染的仍是源场景动画(speedScale/flowDir 由 render() 按减速态注入)。
+		if (this.decelStart !== 0) {
 			const tt = (now - this.decelStart) / 1000;
 			if (tt >= 1) {
-				this.applyFieldParams(this.decelTarget);
 				this.state = this.decelTarget;
-				if (this.decelTarget === "working") this.flow = "cw";
-				else this.flow = "none";
 				this.decelStart = 0;
-			} else {
-				// 轨道粒子流(tool):减速期间 spin 也减速推进(ease-out)
-				this.spin += this.SPIN_SPEED * this.decelDir * (1 - tt) ** 2;
+				this.decelFlowDir = "none";
 			}
 			this.tui.requestRender();
 			return;
 		}
 
-		// 粒子流(think/tool/working):tool 轨道推进 spin;折射态(think/working)
-		// tick 只负责请求重绘(30FPS),粒子在 renderRefract 里推进。
-		if (this.flow === "cw" || this.flow === "ccw") {
-			this.spin += this.flow === "cw" ? this.SPIN_SPEED : -this.SPIN_SPEED;
+		// 非 idle(think/tool/working):~30FPS 重绘;粒子推进由各插件 render 内部完成
+		if (this.state !== "idle") {
 			this.tui.requestRender();
 			return;
 		}
@@ -380,304 +497,67 @@ class JarvisSphereComponent implements Component {
 	}
 
 	render(width: number): string[] {
+		const palette = this.palette;
 		const [r, g, b] =
 			this.state === "idle"
-				? IDLE_COLOR
+				? palette.idle
 				: this.state === "think"
-					? THINK_COLOR
+					? palette.think
 					: this.state === "tool"
-						? TOOL_COLOR
-						: WORKING_COLOR;
+						? palette.tool
+						: palette.working;
 		const open = `\x1b[38;2;${r};${g};${b}m`;
 		const close = "\x1b[0m";
-		// tool -> 轨道粒子流(顺时针,中心留空,内慢外快);think/working -> 折射;idle -> curl noise 流场
-		const raw =
-			this.state === "tool"
-				? this.renderOrbital(width)
-				: this.state === "think" || this.state === "working"
-					? this.renderRefract(width)
-					: this.renderField(width);
+
+		// 场景 -> 动画插件 -> 原始盲文行;颜色保持场景级(ANSI 包裹留在宿主)
+		const slot = this.slotFor(this.state);
+		const plugin = slot.plugin;
+		const params = mergeSceneParams(
+			config.scenes,
+			this.state,
+			plugin.defaults ?? {},
+		);
+
+		// 减速 ease-out 标量 + 方向冻结(非减速:方向由场景参数换算)
+		let speedScale = 1;
+		let flowDir = flowDirFromParams(params);
+		if (this.decelStart !== 0) {
+			const tt = (Date.now() - this.decelStart) / 1000;
+			speedScale = Math.max(0, (1 - tt) ** 2);
+			flowDir = this.decelFlowDir;
+		}
+
+		const host: AnimationHost = {
+			scene: this.state,
+			frame: this.frame,
+			phase: this.phase,
+			speedScale,
+			flowDir,
+			speaking: this.speaking,
+			params,
+		};
+
+		const raw = plugin.render(computeGrid(width), host);
 		return raw.map((line) => `${open}${line}${close}`);
 	}
 
-	/** 四态流场参数(状态切换时调用,不重建粒子,保证平滑过渡) */
-	private applyFieldParams(s: "idle" | "think" | "tool" | "working"): void {
-		switch (s) {
-			case "idle":
-				this.fieldSpeed = 0.06;
-				this.fieldDir = 1;
-				this.fieldCount = 120;
-				this.fieldScroll = 0.02;
-				break;
-			case "think":
-				this.refractSpeed = 1.04; // 折射
-				break;
-			case "working":
-				this.refractSpeed = 1.04; // 快速折射
-				break;
-		}
-	}
-
-	/** tool 态:均匀粒子流(等角分布 + 微分转速:内慢外快,中心留空),方向由 flow 决定 */
-	private renderOrbital(width: number): string[] {
-		const w = Math.max(8, width);
-		const rows = Math.max(4, Math.round(w / 2));
-		const dotCols = w * 2;
-		const dotRows = rows * 4;
-		const cx = dotCols / 2;
-		const cy = dotRows / 2;
-		const R = Math.min(dotCols, dotRows) / 2 - 1;
-
-		const codes: number[] = new Array(rows * w).fill(BRAILLE_BASE);
-		const setDot = (px: number, py: number) => {
-			const dx = Math.round(px);
-			const dy = Math.round(py);
-			if (dx < 0 || dy < 0 || dx >= dotCols || dy >= dotRows) return;
-			const col = Math.floor(dx / 2);
-			const row = Math.floor(dy / 4);
-			codes[row * w + col] |= BRAILLE_BITS[dy % 4][dx % 2];
-		};
-
-		// 均匀粒子流:4 层等间距半径,每层 23 个等角分布点;中心留空。
-		// 角速度 = spin × (r/R):靠内慢、靠外快(微分旋转);方向由 spin 累计方向决定。
-		const R_in = R * 0.55;
-		const R_out = R * 0.95;
-		const LAYERS = 4;
-		const PER_LAYER = 23;
-		const GAP = 3; // 缺口:每层去掉连续 GAP 个角度(≈47°),打破对称,旋转方向一眼可辨(4层×20点=80粒子)
-		for (let l = 0; l < LAYERS; l++) {
-			const r = R_in + ((R_out - R_in) * l) / (LAYERS - 1);
-			for (let k = 0; k < PER_LAYER - GAP; k++) {
-				const a = (k / PER_LAYER) * 2 * Math.PI + this.spin * (r / R);
-				setDot(cx + r * Math.cos(a), cy + r * Math.sin(a));
-			}
-		}
-
-		const lines: string[] = [];
-		for (let row = 0; row < rows; row++) {
-			let line = "";
-			for (let col = 0; col < w; col++)
-				line += String.fromCharCode(codes[row * w + col]);
-			lines.push(line);
-		}
-		return lines;
-	}
-
-	/** 初始化/调节粒子数:首次在圆内均匀分布;后续按 targetN 增减 */
-	private ensureParticles(
-		cx: number,
-		cy: number,
-		R: number,
-		targetN: number,
-	): void {
-		if (this.particles.length === 0) {
-			for (let i = 0; i < targetN; i++) {
-				// 圆内均匀随机分布(√rand 保证面积均匀)
-				const r0 = Math.sqrt(Math.random()) * R * 0.9;
-				const a0 = Math.random() * 6.2831853;
-				this.particles.push({
-					x: cx + r0 * Math.cos(a0),
-					y: cy + r0 * Math.sin(a0),
-					age: Math.random() * 100,
-					life: 80 + Math.random() * 80,
-				});
-			}
-		} else if (this.particles.length < targetN) {
-			// 不足:追加圆内随机位置粒子
-			for (let i = this.particles.length; i < targetN; i++) {
-				const r1 = Math.sqrt(Math.random()) * R * 0.85;
-				const a1 = Math.random() * 6.2831853;
-				this.particles.push({
-					x: cx + r1 * Math.cos(a1),
-					y: cy + r1 * Math.sin(a1),
-					age: 0,
-					life: 80 + Math.random() * 80,
-				});
-			}
-		} else if (this.particles.length > targetN) {
-			// 多余:截断(简化;视觉影响小,粒子为稀疏点)
-			this.particles.length = targetN;
-		}
-	}
-
-	/** 推进粒子一步:沿 curl noise 流场位移,超界/寿终重生 */
-	private stepParticles(cx: number, cy: number, R: number): void {
-		const delta = 0.8;
-		const t = this.frame;
-		const scrollX = t * this.fieldScroll;
-		const scrollY = t * this.fieldScroll * 0.7;
-		const noiseScale = 0.15;
-
-		// 减速期间:ease-out 速度衰减,方向保持 decelDir
-		let speed = this.fieldSpeed;
-		let dir = this.fieldDir;
-		if (this.flow === "decel") {
-			const now = Date.now();
-			const tt = (now - this.decelStart) / 1000;
-			const velFactor = Math.max(0, (1 - tt) ** 2);
-			speed = this.fieldSpeed * velFactor;
-			dir = this.decelDir;
-		}
-
-		for (const p of this.particles) {
-			const nx = (p.x - cx) * noiseScale + scrollX;
-			const ny = (p.y - cy) * noiseScale + scrollY;
-			const [vx, vy] = curl2D(nx, ny, delta);
-			p.x += vx * speed * dir;
-			p.y += vy * speed * dir;
-			p.age++;
-			// 圆边界:粒子超出半径 R 或寿终则重生
-			const dx2 = p.x - cx,
-				dy2 = p.y - cy;
-			if (dx2 * dx2 + dy2 * dy2 > R * R || p.age > p.life) {
-				const r2 = Math.sqrt(Math.random()) * R * 0.85;
-				const a2 = Math.random() * 6.2831853;
-				p.x = cx + r2 * Math.cos(a2);
-				p.y = cy + r2 * Math.sin(a2);
-				p.age = 0;
-				p.life = 80 + Math.random() * 80;
-			}
-		}
-	}
-
-	/** 统一流场渲染:粒子点 + idle 态中心水波纹 */
-	private renderField(width: number): string[] {
-		const w = Math.max(6, width);
-		const rows = Math.max(4, Math.round(w / 2));
-		const dotCols = w * 2;
-		const dotRows = rows * 4;
-		const cx = dotCols / 2;
-		const cy = dotRows / 2;
-		const R = Math.min(dotCols, dotRows) / 2 - 1;
-
-		this.ensureParticles(cx, cy, R, this.fieldCount);
-		this.stepParticles(cx, cy, R);
-
-		const codes: number[] = new Array(rows * w).fill(BRAILLE_BASE);
-		const setDot = (px: number, py: number) => {
-			const dx = Math.round(px);
-			const dy = Math.round(py);
-			if (dx < 0 || dy < 0 || dx >= dotCols || dy >= dotRows) return;
-			const col = Math.floor(dx / 2);
-			const row = Math.floor(dy / 4);
-			codes[row * w + col] |= BRAILLE_BITS[dy % 4][dx % 2];
-		};
-
-		// 粒子:生命周期 sin 渐变(首尾淡出,中间最亮);fade > 0.3 才画
-		for (const p of this.particles) {
-			const fade = Math.sin((p.age / p.life) * Math.PI);
-			if (fade > 0.3) setDot(p.x, p.y);
-		}
-
-		// idle 态额外画中心微弱水波纹(保留 idle 标识感)
-		if (this.state === "idle") {
-			const coreR = R * 0.4;
-			for (let row = 0; row < rows; row++) {
-				for (let col = 0; col < w; col++) {
-					for (let dr = 0; dr < 4; dr++) {
-						for (let dc = 0; dc < 2; dc++) {
-							const dx = col * 2 + dc,
-								dy = row * 4 + dr;
-							const dist = Math.hypot(dx - cx, dy - cy);
-							if (dist <= coreR) {
-								const wave = Math.sin(dist * 1.5 - this.phase * 2.0);
-								if (wave > 0.4) codes[row * w + col] |= BRAILLE_BITS[dr][dc];
-							}
-						}
-					}
-				}
-			}
-		}
-
-		const lines: string[] = [];
-		for (let row = 0; row < rows; row++) {
-			let line = "";
-			for (let col = 0; col < w; col++)
-				line += String.fromCharCode(codes[row * w + col]);
-			lines.push(line);
-		}
-		return lines;
-	}
-
-	/** 折射粒子渲染:圆内运动,边界反射+内部随机折射,折线连成光线/闪电感 */
-	private renderRefract(width: number): string[] {
-		const w = Math.max(6, width);
-		const rows = Math.max(4, Math.round(w / 2));
-		const dotCols = w * 2;
-		const dotRows = rows * 4;
-		const cx = dotCols / 2;
-		const cy = dotRows / 2;
-		const R = Math.min(dotCols, dotRows) / 2 - 1;
-
-		// 首次初始化折射粒子
-		if (this.refractParticles.length === 0) {
-			for (let i = 0; i < REFRACT_COUNT; i++) {
-				const p: RefractParticle = {
-					px: 0,
-					py: 0,
-					vx: 0,
-					vy: 0,
-					pts: [],
-					bounces: 0,
-					maxBounces: 3,
-				};
-				spawnRefract(p, cx, cy, R);
-				this.refractParticles.push(p);
-			}
-		}
-
-		// 减速 ease-out 系数(与 stepParticles 同逻辑),renderRefract 用
-		if (this.flow === "decel") {
-			const tt = (Date.now() - this.decelStart) / 1000;
-			this.velFactor = Math.max(0, (1 - tt) ** 2);
+	/** 同步主题四态颜色:主题切换时由 invalidate 或 tick 轮询调用;读 vars 失败回退亮暗调色板 */
+	private syncTheme(): void {
+		const p = readThemePalette(this.theme);
+		if (p) {
+			this.palette = p;
 		} else {
-			this.velFactor = 1;
+			const light = isLightTheme(this.theme);
+			this.palette = light ? LIGHT_PALETTE : DARK_PALETTE;
 		}
-
-		// 推进粒子
-		const speed = this.refractSpeed * this.velFactor;
-		for (const p of this.refractParticles) stepRefract(p, cx, cy, R, speed);
-
-		// 渲染折线:连接所有折射点 + 最后折射点到当前位置
-		const codes: number[] = new Array(rows * w).fill(BRAILLE_BASE);
-		for (const p of this.refractParticles) {
-			for (let i = 0; i < p.pts.length - 2; i += 2) {
-				lineDot(
-					codes,
-					w,
-					dotCols,
-					dotRows,
-					p.pts[i],
-					p.pts[i + 1],
-					p.pts[i + 2],
-					p.pts[i + 3],
-				);
-			}
-			const last = p.pts.length - 2;
-			if (last >= 0)
-				lineDot(
-					codes,
-					w,
-					dotCols,
-					dotRows,
-					p.pts[last],
-					p.pts[last + 1],
-					p.px,
-					p.py,
-				);
-		}
-
-		const lines: string[] = [];
-		for (let row = 0; row < rows; row++) {
-			let line = "";
-			for (let col = 0; col < w; col++)
-				line += String.fromCharCode(codes[row * w + col]);
-			lines.push(line);
-		}
-		return lines;
 	}
 
-	invalidate(): void {}
+	invalidate(): void {
+		// 主题切换( /settings 选择、setTheme、终端亮暗自动同步、自定义主题热重载)
+		// 都会触发 TUI 对所有已挂载组件调 invalidate,这里重新判断亮暗并重绘。
+		this.syncTheme();
+		this.tui.requestRender();
+	}
 
 	dispose(): void {
 		if (this.interval) {
@@ -732,8 +612,8 @@ function startSphere(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	];
 
 	ctx.ui.custom(
-		(tui: TUI) => {
-			sphere = new JarvisSphereComponent(tui);
+		(tui: TUI, theme: Theme) => {
+			sphere = new JarvisSphereComponent(tui, theme);
 			return sphere;
 		},
 		{
@@ -754,7 +634,9 @@ function startSphere(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	);
 
 	// 用 globalThis 标志校正初始态(挂载时 TTS 可能已在播放)
-	if ((globalThis as any).__piTtsPlaying) sphere?.setSpeaking(true);
+	// 注:此处 sphere 已被顶部守卫收窄为 null(闭包内赋值不参与 CFA),断言回原类型避免 TS never 误报
+	if ((globalThis as any).__piTtsPlaying)
+		(sphere as JarvisSphereComponent | null)?.setSpeaking(true);
 }
 
 function stopSphere(): void {
@@ -799,7 +681,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// thinking 信号:think = 逆时针红流。引用模块级 sphere,未挂载时为 null 自动 no-op。
+	// thinking 信号:think = 折射红流。引用模块级 sphere,未挂载时为 null 自动 no-op。
 	pi.on("message_update", (event: any, ctx: any) => {
 		if (ctx?.mode !== "tui") return;
 		const t = event?.assistantMessageEvent?.type;
@@ -808,7 +690,7 @@ export default function (pi: ExtensionAPI) {
 		else if (t === "text_delta") sphere?.onTextDelta();
 	});
 
-	// 工具调用信号:tool = 顺时针黄流
+	// 工具调用信号:tool = 轨道黄流
 	pi.on("tool_execution_start", (_event: any, ctx: any) => {
 		if (ctx?.mode !== "tui") return;
 		sphere?.onToolStart();
