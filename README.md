@@ -21,7 +21,7 @@
   | Sub-agent | yellow (tool) | sub-agent activity reuses the tool animation via `subagents:started` / `subagents:completed` / `subagents:failed` signals |
   | Wind-down | keeps current color | 1-second ease-out deceleration after thinking/tool/working ends, then back to idle |
 
-- **TTS sync**: when [pi-ext-tts-mimo](https://github.com/fan56/pi-jarvis-sphere) plays speech, the sphere pulses denser and faster, as if talking (idle 10 FPS → 30 FPS while speaking).
+- **TTS sync**: when [pi-ext-tts-mimo](https://github.com/fan56/pi-ext-tts-mimo) plays speech, the sphere pulses denser and faster, as if talking (idle 10 FPS → 30 FPS while speaking).
 - **Direction anchor**: the flow field rotates clockwise/counter-clockwise; deceleration is eased so direction stays readable.
 - **Non-intrusive**: a `nonCapturing` overlay — typing and keybindings are completely unaffected.
 - **Toggleable**: `/jarvis` toggles it on/off, persisted to `config.json` (on by default).
@@ -120,3 +120,7 @@ Then `/reload` in pi. Missing params fall back to each plugin's `defaults`; `dir
 
 - [ ] V2: standalone external window (extension spins up a local WebSocket + browser, real 3D WebGL particle sphere)
 - [ ] Think-level color ramp (off→max thermal gradient; once implemented, later superseded by the four-state colors)
+
+## 📜 Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the full version history.

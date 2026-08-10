@@ -120,3 +120,7 @@ config.json          # 你的可编辑"插件目录"
 
 - [ ] V2:外部独立窗口(扩展内起本地 WebSocket + 浏览器,真 3D WebGL 粒子球)
 - [ ] 思考等级联动颜色(off->max 热力阶梯色阶,曾实现后被三态色取代)
+
+## 📜 Changelog
+
+完整版本历史见 [CHANGELOG.md](CHANGELOG.md)。
