@@ -11,10 +11,11 @@
       }
     },
     "think": {
-      "animation": "refract",
+      "animation": "stars",
       "params": {
-        "refractSpeed": 1.04,
-        "refractCount": 16
+        "starSpeed": 0.02,
+        "cycleFrames": 160,
+        "starSize": 0.82
       }
     },
     "tool": {

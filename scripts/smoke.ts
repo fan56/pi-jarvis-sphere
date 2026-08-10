@@ -4,12 +4,13 @@
  * 运行: node scripts/run.mjs scripts/smoke.ts   (走 pi 自带 jiti)
  *   或: npx jiti scripts/smoke.ts                (回退方案)
  *
- * 5 组断言(全部为真实代码,无注释占位):
+ * 6 组断言(全部为真实代码,无注释占位):
  *   [1] 注册表完备:每个 SCENE_IDS 的 DEFAULT_SCENES 动画 id 都在注册表
- *   [2] 三动画 × 四场景全组合渲染 60 帧不抛错且形状正确
+ *   [2] 注册表全部动画 × 四场景全组合渲染 60 帧不抛错且形状正确
  *   [3] 减速标量:speedScale=0 时 orbital 两帧严格相同 / flow-field 两帧近似相同
  *   [4] 配置合并:缺场景/未知 id -> 默认兜底;params 覆盖生效(含渲染层面确定性验证)
  *   [5] 实例隔离:think/working 两个 refract 实例粒子状态独立(种子随机,字节级对照)
+ *   [6] stars:形状序列循环 / 绘制渐进 / 减速冻结 / 参数覆盖 / 7 形状完备
  */
 import { computeGrid } from "../lib/geometry.ts";
 import { SCENE_IDS } from "../lib/types.ts";
@@ -21,7 +22,10 @@ import {
 	sanitizeScenesConfig,
 } from "../lib/scenes.ts";
 import type { ScenesConfig } from "../lib/scenes.ts";
-import { getAnimationFactory } from "../animations/registry.ts";
+import {
+	ANIMATION_REGISTRY,
+	getAnimationFactory,
+} from "../animations/registry.ts";
 
 let passed = 0;
 let failed = 0;
@@ -110,10 +114,12 @@ console.log("[1] 注册表完备:DEFAULT_SCENES 的每个动画 id 都已注册"
 // [2] 三动画 × 四场景全组合,各渲染 60 帧,形状正确
 // ─────────────────────────────────────────────────────────────
 console.log(
-	"[2] 3 动画 × 4 场景 = 12 组合,各渲染 60 帧(通过 config 指定 scenes[scene].animation)",
+	`[2] ${Object.keys(ANIMATION_REGISTRY).length} 动画 × 4 场景 = ${
+		Object.keys(ANIMATION_REGISTRY).length * SCENE_IDS.length
+	} 组合,各渲染 60 帧(覆盖注册表全部动画,通过 config 指定 scenes[scene].animation)`,
 );
 {
-	const ALL_IDS = [...new Set(SCENE_IDS.map((s) => DEFAULT_SCENES[s]))];
+	const ALL_IDS = Object.keys(ANIMATION_REGISTRY);
 	for (const id of ALL_IDS) {
 		for (const scene of SCENE_IDS) {
 			const scenes: ScenesConfig = {
@@ -386,6 +392,127 @@ console.log(
 	} finally {
 		Math.random = realRandom;
 	}
+}
+
+// ─────────────────────────────────────────────────────────────
+// [6] stars:形状序列循环 / 绘制渐进 / 减速冻结 / 参数覆盖 / 7 形状完备
+// ─────────────────────────────────────────────────────────────
+console.log(
+	"[6] stars:形状序列循环 / 绘制渐进 / 减速冻结 / 参数覆盖 / 7 形状完备",
+);
+{
+	const starsFactory = getAnimationFactory("stars")!;
+	const starsDefaults = starsFactory().defaults ?? {};
+	const params = mergeSceneParams({}, "think", starsDefaults);
+	const cycleFrames = params.cycleFrames ?? 160;
+	const drawFrames = cycleFrames * 0.4;
+	const totalFrames = cycleFrames * 7 + 10;
+
+	// 6a + 6b:同一实例渲染覆盖 7 个完整周期 + 余量,收集每帧输出
+	const p = starsFactory();
+	const outputs: string[] = [];
+	for (let f = 0; f < totalFrames; f++) {
+		outputs.push(
+			p.render(GRID, hostFor("think", { frame: f, params })).join(""),
+		);
+	}
+	const distinct = new Set(outputs).size;
+	// 6a 措辞:仅证「形状序列在持续变化(非静止)」,不承诺「循环」——循环完备由 6e 覆盖
+	assert(
+		distinct >= 2,
+		`6a 形状序列在持续变化(非静止):${totalFrames} 帧内出现 ${distinct} 种不同输出(≥2)`,
+	);
+
+	// 6b 绘制渐进:spin 冻结(flowDir="none" + starSpeed=0)下第 1 帧(1 条边)与
+	//     第 60 帧(更多边)输出不同——边是逐条画出的,不是瞬间全画
+	//     (stars 不读 flowDir,真正冻结 spin 靠 starSpeed=0)
+	const pProg = starsFactory();
+	const progParams = { ...params, starSpeed: 0 };
+	const early = pProg
+		.render(
+			GRID,
+			hostFor("think", { frame: 0, params: progParams, flowDir: "none" }),
+		)
+		.join("");
+	let late = "";
+	for (let f = 1; f <= 60; f++) {
+		late = pProg
+			.render(
+				GRID,
+				hostFor("think", { frame: f, params: progParams, flowDir: "none" }),
+			)
+			.join("");
+	}
+	assert(
+		early !== late,
+		`6b 绘制渐进:spin 冻结下第 1 帧(1 条边)与第 60 帧(更多边)输出不同(边数递增,非瞬间全画)`,
+	);
+
+	// 6c 减速冻结:speedScale=0 连续两帧严格相同(stars 无随机)
+	//     先以 speedScale=1 推进 60 帧脱离空白初始态,再冻结两帧——
+	//     避免「空==空」假阳性(空白帧两两相同不等于冻结)
+	const pFrozen = starsFactory();
+	for (let f = 0; f < 60; f++) {
+		pFrozen.render(
+			GRID,
+			hostFor("think", { frame: f, params, speedScale: 1 }),
+		);
+	}
+	const f0 = pFrozen.render(
+		GRID,
+		hostFor("think", { frame: 60, params, speedScale: 0 }),
+	);
+	const f1 = pFrozen.render(
+		GRID,
+		hostFor("think", { frame: 61, params, speedScale: 0 }),
+	);
+	const frozenDiff = cellsDiff(f0, f1);
+	const blank = "\u2800".repeat(GRID.rows * GRID.w);
+	const frozenOk = shapeOk(f0) && frozenDiff === 0 && f0.join("") !== blank;
+	assert(
+		frozenOk,
+		`6c 减速冻结:speedScale=0 连续两帧严格相同且输出非空(差异格子=${frozenDiff})`,
+	);
+
+	// 6d 参数覆盖流入渲染:starSize 0.5 vs 0.9 输出不同(大小参数确实生效)
+	const paramsS = mergeSceneParams({}, "think", {
+		...starsDefaults,
+		starSize: 0.5,
+	});
+	const paramsL = mergeSceneParams({}, "think", {
+		...starsDefaults,
+		starSize: 0.9,
+	});
+	const pS = starsFactory();
+	const pL = starsFactory();
+	for (let f = 0; f < Math.round(drawFrames); f++) {
+		pS.render(GRID, hostFor("think", { frame: f, params: paramsS }));
+		pL.render(GRID, hostFor("think", { frame: f, params: paramsL }));
+	}
+	const outS = pS.render(
+		GRID,
+		hostFor("think", { frame: Math.round(drawFrames), params: paramsS }),
+	);
+	const outL = pL.render(
+		GRID,
+		hostFor("think", { frame: Math.round(drawFrames), params: paramsL }),
+	);
+	const sizeDiff = cellsDiff(outS, outL);
+	assert(
+		sizeDiff > 0,
+		`6d 参数覆盖流入渲染:starSize 0.5 vs 0.9 输出不同(差异格子=${sizeDiff})`,
+	);
+
+	// 6e 形状切换完整性:7 个周期各取代表帧(k*cycle + cycle*0.5),互不相同
+	//     (不导出 SHAPES 内部常量,用 cycleFrames 直接计算代表帧,保持封装)
+	const reps = new Set<string>();
+	for (let k = 0; k < 7; k++) {
+		reps.add(outputs[k * cycleFrames + Math.round(cycleFrames * 0.5)]);
+	}
+	assert(
+		reps.size >= 7,
+		`6e 形状切换完整:7 个周期代表帧互不相同(${reps.size} 种,期望 ≥7)`,
+	);
 }
 
 // ─────────────────────────────────────────────────────────────
