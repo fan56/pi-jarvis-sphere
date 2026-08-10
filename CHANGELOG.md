@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **npm package** `@aiwayds/pi-jarvis-sphere` — publishable via `pi install
+  npm:@aiwayds/pi-jarvis-sphere`; `package.json` with pi manifest,
+  `peerDependencies` on the pi core packages, MIT license.
+
+### Changed
+
+- **Config precedence**: user config `~/.pi/agent/pi-jarvis-sphere.json` is now
+  read first (created on first `/jarvis` toggle); the bundled `config.json`
+  serves as a read-only default — `pi update` no longer overwrites settings.
+- README / README.zh.md: npm install as the recommended path, config
+  precedence documented.
+
 ## [1.0.0] - 2026-08-10
 
 First public release. A particle-sphere overlay for the pi agent that shifts

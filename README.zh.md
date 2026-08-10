@@ -29,6 +29,14 @@ Pi agent 的 **Jarvis 粒子球**:一个悬浮在 pi 终端右下角的粒子球
 
 ## 📦 安装
 
+### 方式 A — npm(推荐)
+
+```bash
+pi install npm:@aiwayds/pi-jarvis-sphere
+```
+
+### 方式 B — 源码
+
 ```bash
 # 1. 克隆/放到独立目录(与 ~/github 下其他 pi 扩展同约定)
 git clone https://github.com/fan56/pi-jarvis-sphere.git ~/github/pi-jarvis-sphere
@@ -45,13 +53,16 @@ ln -s ~/github/pi-jarvis-sphere ~/.pi/agent/extensions/pi-jarvis-sphere
 
 | 命令 | 作用 |
 |---|---|
-| `/jarvis` | 切换球体显示/隐藏(状态写入 `config.json`) |
+| `/jarvis` | 切换球体显示/隐藏(状态写入 `~/.pi/agent/pi-jarvis-sphere.json`) |
 
-`config.json`(扩展目录下,默认):
+用户配置文件位于 agent 目录(首次 `/jarvis` 切换时创建),**可自由编辑**:
 
 ```json
 { "enabled": true }
 ```
+
+> **配置优先级**:存在 `~/.pi/agent/pi-jarvis-sphere.json` 时优先读它;否则回退到包内
+> 自带的 `config.json`(只读默认值)。包内文件永远不会被覆盖——`pi update` 不会丢你的设置。
 
 ## 🧩 动画插件化
 

@@ -37,6 +37,7 @@
 
 import { readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -61,7 +62,12 @@ import {
 import type { ScenesConfig } from "./lib/scenes.ts";
 import { getAnimationFactory } from "./animations/registry.ts";
 
-const CONFIG_FILE = join(__dirname, "config.json");
+// 用户配置优先(npm 包安装后可编辑):~/.pi/agent/pi-jarvis-sphere.json
+// 不存在时回退包内默认 config.json(只读,升级不丢用户配置)
+const AGENT_DIR = process.env.PI_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+const USER_CONFIG_FILE = join(AGENT_DIR, "pi-jarvis-sphere.json");
+const PACKAGE_CONFIG_FILE = join(__dirname, "config.json");
+const CONFIG_FILE = USER_CONFIG_FILE; // 写入目标始终是用户目录
 // overlay 列宽;盲文每格 2 点列 => 28 点宽,与 7 行(28 点高)配成方形球
 const WIDTH = 14;
 
@@ -280,8 +286,12 @@ const config: JarvisConfig = { enabled: true, scenes: {} };
 
 function loadConfig(): void {
 	try {
-		if (existsSync(CONFIG_FILE)) {
-			const data = JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
+		// 优先读用户配置;缺失则回退包内默认(只读源)
+		const src = existsSync(USER_CONFIG_FILE)
+			? USER_CONFIG_FILE
+			: PACKAGE_CONFIG_FILE;
+		if (existsSync(src)) {
+			const data = JSON.parse(readFileSync(src, "utf-8"));
 			config.enabled = data.enabled ?? DEFAULT_CONFIG.enabled;
 			// 只收合法覆盖项:动画 id 为 string,参数只收有限 number(sanitizeScenesConfig)
 			config.scenes = sanitizeScenesConfig(data.scenes);

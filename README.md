@@ -29,6 +29,14 @@
 
 ## 📦 Installation
 
+### Option A — npm (recommended)
+
+```bash
+pi install npm:@aiwayds/pi-jarvis-sphere
+```
+
+### Option B — from source
+
 ```bash
 # 1. Clone into its own directory (same convention as other ~/github pi extensions)
 git clone https://github.com/fan56/pi-jarvis-sphere.git ~/github/pi-jarvis-sphere
@@ -45,13 +53,17 @@ ln -s ~/github/pi-jarvis-sphere ~/.pi/agent/extensions/pi-jarvis-sphere
 
 | Command | Effect |
 |---|---|
-| `/jarvis` | Toggle the sphere on/off (state written to `config.json`) |
+| `/jarvis` | Toggle the sphere on/off (state written to `~/.pi/agent/pi-jarvis-sphere.json`) |
 
-`config.json` (in the extension dir, default):
+`config.json` is **user-editable** in your agent dir (created on first `/jarvis` toggle):
 
 ```json
 { "enabled": true }
 ```
+
+> **Config precedence**: `~/.pi/agent/pi-jarvis-sphere.json` is read first if it exists;
+> otherwise the package's bundled `config.json` is used as a read-only default.
+> The package file is never overwritten — `pi update` won't lose your settings.
 
 ## 🧩 Plugin Architecture
 
