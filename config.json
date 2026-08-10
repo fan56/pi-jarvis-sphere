@@ -15,7 +15,8 @@
       "params": {
         "starSpeed": 0.02,
         "cycleFrames": 160,
-        "starSize": 0.82
+        "starSize": 0.82,
+        "breathSpeed": 0.04
       }
     },
     "tool": {
@@ -26,10 +27,10 @@
       }
     },
     "working": {
-      "animation": "refract",
+      "animation": "orbital",
       "params": {
-        "refractSpeed": 1.04,
-        "refractCount": 16
+        "spinSpeed": 0.15,
+        "dir": 1
       }
     }
   }

@@ -81,9 +81,7 @@ parts.push(
 	`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">`,
 );
 parts.push(`  <rect width="${W}" height="${H}" rx="12" fill="#0d1117"/>`);
-parts.push(
-	`  <g font-family="ui-monospace,SFMono-Regular,Menlo,monospace">`,
-);
+parts.push(`  <g font-family="ui-monospace,SFMono-Regular,Menlo,monospace">`);
 parts.push(
 	`    <text x="26" y="20" font-size="13" fill="#8b949e">pi-jarvis-sphere · think 场景 stars 动画 · 7 shapes (真实渲染)</text>`,
 );
@@ -124,10 +122,14 @@ parts.push(`</svg>`);
 
 const out = resolve(process.cwd(), "stars-preview.svg");
 writeFileSync(out, parts.join("\n") + "\n");
-console.log(`written: ${out} (${parts.length} parts, dots per shape: ${SHAPES.map((s, k) => {
-	const plugin = stars();
-	const t = k * cycleFrames + cycleFrames * 0.56;
-	let l: string[] = [];
-	for (let f = 0; f <= t; f++) l = plugin.render(GRID, hostFor(f));
-	return `${s.n}:${dotsOf(l).length}`;
-}).join(" ")})`);
+console.log(
+	`written: ${out} (${parts.length} parts, dots per shape: ${SHAPES.map(
+		(s, k) => {
+			const plugin = stars();
+			const t = k * cycleFrames + cycleFrames * 0.56;
+			let l: string[] = [];
+			for (let f = 0; f <= t; f++) l = plugin.render(GRID, hostFor(f));
+			return `${s.n}:${dotsOf(l).length}`;
+		},
+	).join(" ")})`,
+);

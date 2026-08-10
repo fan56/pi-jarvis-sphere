@@ -10,7 +10,7 @@
  *   [3] 减速标量:speedScale=0 时 orbital 两帧严格相同 / flow-field 两帧近似相同
  *   [4] 配置合并:缺场景/未知 id -> 默认兜底;params 覆盖生效(含渲染层面确定性验证)
  *   [5] 实例隔离:think/working 两个 refract 实例粒子状态独立(种子随机,字节级对照)
- *   [6] stars:形状序列循环 / 绘制渐进 / 减速冻结 / 参数覆盖 / 7 形状完备
+ *   [6] stars:形状序列循环 / 绘制渐进 / 减速冻结 / 参数覆盖 / 7 形状完备 / 中心点存在
  */
 import { computeGrid } from "../lib/geometry.ts";
 import { SCENE_IDS } from "../lib/types.ts";
@@ -453,10 +453,7 @@ console.log(
 	//     避免「空==空」假阳性(空白帧两两相同不等于冻结)
 	const pFrozen = starsFactory();
 	for (let f = 0; f < 60; f++) {
-		pFrozen.render(
-			GRID,
-			hostFor("think", { frame: f, params, speedScale: 1 }),
-		);
+		pFrozen.render(GRID, hostFor("think", { frame: f, params, speedScale: 1 }));
 	}
 	const f0 = pFrozen.render(
 		GRID,
@@ -512,6 +509,22 @@ console.log(
 	assert(
 		reps.size >= 7,
 		`6e 形状切换完整:7 个周期代表帧互不相同(${reps.size} 种,期望 ≥7)`,
+	);
+
+	// 6f 中心点存在:新实例 speedScale=1 渲染 1 帧(呼吸相位推进 0.04,count≥1),断言中心
+	//     盲文字符(computeGrid(14) 的 cx/cy -> row=floor(cy/4)、col=floor(cx/2))非纯空格,
+	//     证明中心 2×2 点簇在渲染。中心点不随形状变化,故不影响 6e 的形状互异判断。
+	const pCenter = starsFactory();
+	const centerLines = pCenter.render(
+		GRID,
+		hostFor("think", { frame: 0, params }),
+	);
+	const centerRow = Math.floor(GRID.cy / 4);
+	const centerCol = Math.floor(GRID.cx / 2);
+	const centerCode = centerLines[centerRow].charCodeAt(centerCol);
+	assert(
+		centerCode > 0x2800,
+		`6f 中心点存在:中心盲文字符码位 ${centerCode} > 0x2800(呼吸点已渲染)`,
 	);
 }
 
