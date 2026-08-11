@@ -37,6 +37,7 @@ const targets = [
 	"animations/refract.ts",
 	"animations/orbital.ts",
 	"animations/stars.ts",
+	"animations/stars2.ts",
 	"scripts/smoke.ts",
 ];
 

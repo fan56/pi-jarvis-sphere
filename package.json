@@ -1,6 +1,6 @@
 {
   "name": "@aiwayds/pi-jarvis-sphere",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "pi-coding-agent extension — Jarvis particle sphere overlay: four-state animation (flow-field / stars / orbital) shifting color with pi's live state, plugin-architected and config-driven",
   "keywords": [
     "pi-package",

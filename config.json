@@ -11,7 +11,7 @@
       }
     },
     "think": {
-      "animation": "stars",
+      "animation": "stars2",
       "params": {
         "starSpeed": 0.02,
         "cycleFrames": 160,

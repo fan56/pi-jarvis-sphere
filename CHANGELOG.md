@@ -5,10 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] - 2026-08-11
 
 ### Added
 
+- **New `stars2` animation** (think scene): staggered star
+  animation — the next shape starts generating when the current one is
+  halfway through its lifecycle, so two shapes are always on screen
+  simultaneously (50% phase offset). Shape order is randomized but never
+  repeats the same shape twice in a row. The think scene now defaults to
+  `stars2` (configurable via `config.json`).
 - **npm package** `@aiwayds/pi-jarvis-sphere` — publishable via `pi install
   npm:@aiwayds/pi-jarvis-sphere`; `package.json` with pi manifest,
   `peerDependencies` on the pi core packages, MIT license.
@@ -88,5 +94,4 @@ where the scene → animation mapping is driven entirely by `config.json`.
   `.gitignore`); source video `pi-javise.mov` excluded via `.gitignore`.
 
 [pi-ext-tts-mimo]: https://github.com/fan56/pi-ext-tts-mimo
-[Unreleased]: https://github.com/fan56/pi-jarvis-sphere/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/fan56/pi-jarvis-sphere/releases/tag/v1.0.0

@@ -9,12 +9,14 @@ import { flowField } from "./flow-field.ts";
 import { refract } from "./refract.ts";
 import { orbital } from "./orbital.ts";
 import { stars } from "./stars.ts";
+import { stars2 } from "./stars2.ts";
 
 export const ANIMATION_REGISTRY: Readonly<Record<string, AnimationFactory>> = {
 	"flow-field": flowField,
 	refract: refract,
 	orbital: orbital,
 	stars: stars,
+	stars2: stars2,
 };
 
 /** 该 id 是否有已注册的动画 */

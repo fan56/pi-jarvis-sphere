@@ -74,6 +74,7 @@ animations/          # animation plugins (new animation = new file + one registr
   flow-field.ts      # flow field + water ripple (idle default)
   refract.ts         # refraction particles
   stars.ts           # star shapes (think default; 7-shape loop hand-drawn)
+  stars2.ts          # staggered star shapes (think default v2; two shapes overlapping)
   orbital.ts         # orbital particle ring (tool default)
   registry.ts        # id -> factory registry
 lib/                 # shared layer: types / grid geometry / braille primitives / noise / scene config
@@ -121,6 +122,20 @@ The default animation for the **think** scene: loops through **7 hand-drawn shap
 Then `/reload` in pi. Missing params fall back to each plugin's `defaults`; `dir` controls rotation (`1` = clockwise / `-1` = counter-clockwise).
 
 > Note: think and working are independent animation slots — you can mount different animations per scene; the same animation in multiple scenes holds separate particle instances (no interference). **working** uses the same clockwise orbital particle flow as **tool** (`dir: 1`).
+
+### Stars2 — think scene default (v2)
+
+The default **think** animation as of v1.1.0: staggered star shapes — the next
+shape starts generating when the current one is halfway through its lifecycle,
+so **two shapes are always on screen simultaneously** (50% phase offset).
+Shape order is randomized but never repeats the same shape twice in a row.
+
+| Param | Meaning | Default |
+| --- | --- | --- |
+| `starSpeed` | rotation speed (rad/frame; positive = counter-clockwise) | `0.02` |
+| `cycleFrames` | frames per shape cycle (second shape starts at the 50% phase of the first) | `160` |
+| `starSize` | star circumradius as a fraction of the sphere radius | `0.82` |
+| `breathSpeed` | center breathing speed (`0.04` ≈ one breath every 2.6 s) | `0.04` |
 
 ## 🧪 Development & Debugging
 
