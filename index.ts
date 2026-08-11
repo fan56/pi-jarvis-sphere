@@ -257,11 +257,15 @@ function readThemePalette(theme: Theme): Palette | null {
 	// 背景色:同法解析 bg,没有则用 selectedBg 兜底,都没有 => 默认黑
 	const bg = resolve("bg", "selectedBg") ?? "#000000";
 
-	// 浅底压暗:各通道乘 0.55 取整,保色相
+	// 浅底压暗:背景浅时只压暗"自身偏亮"的颜色(relLum > 0.5),保色相且保证
+	// 对比度;本身偏深的主题色(如 github-light 的 #0366d6)保留原色——
+	// 无条件 ×0.55 会把本就深的色压成近黑,浅色主题下呈黑色粒子(修复 bug)
 	if (relLum(bg) > 0.5) {
-		for (const key of Object.keys(out) as Array<
+		for (const key of Object.keys(hexes) as Array<
 			"idle" | "think" | "tool" | "working"
 		>) {
+			const hex = hexes[key];
+			if (!hex || relLum(hex) <= 0.5) continue;
 			const [r, g, b] = out[key];
 			out[key] = [
 				Math.round(r * 0.55),

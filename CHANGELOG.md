@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-08-13
+
+### Fixed
+
+- **浅色自定义主题下动画呈黑色粒子**:`readThemePalette` 在浅色背景
+  (relLum(bg) > 0.5) 时对所有四色无条件 ×0.55 压暗,导致本身就偏深的主题色
+  (如 github-light 的 #0366d6) 被压成近黑。现改为仅压暗"自身偏亮"的颜色
+  (relLum(hex) > 0.5),偏深主题色保留原色,浅色主题下粒子颜色恢复正常。
+
 ## [1.2.0] - 2026-08-11
 
 - **Fixed** npm package extension not loading under pi: pi's `collectPackageResources`
