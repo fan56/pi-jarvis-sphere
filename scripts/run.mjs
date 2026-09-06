@@ -10,12 +10,11 @@
  *   3. pi 自带 jiti 的固定路径(本机零安装)
  * 找不到则报错并提示回退方案(npm install --no-save jiti 后 npx jiti)。
  */
-import { createRequire } from "node:module";
 import path from "node:path";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const require = createRequire(import.meta.url);
 const ROOT = path.resolve(__dirname, "..");
 
 const PI_JITI =
@@ -24,11 +23,10 @@ const PI_JITI =
 let jitiUrl = null;
 const CANDIDATES = [];
 if (process.env.JITI_PATH) CANDIDATES.push(process.env.JITI_PATH);
-try {
-	CANDIDATES.push(createRequire(path.join(ROOT, "package.json")).resolve("jiti/lib/jiti.mjs"));
-} catch {
-	// node_modules 里没有 jiti,继续下一个候选
-}
+// 物理路径探测:不经 require.resolve,避免 jiti 包 exports 拦截子路径
+// (CI 上 jiti/lib/jiti.mjs 不是可解析的导出入口,但文件就在那里)。
+const nodeModulesJiti = path.join(ROOT, "node_modules", "jiti", "lib", "jiti.mjs");
+if (fs.existsSync(nodeModulesJiti)) CANDIDATES.push(nodeModulesJiti);
 CANDIDATES.push(PI_JITI);
 
 for (const c of CANDIDATES) {
