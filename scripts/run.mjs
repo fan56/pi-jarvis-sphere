@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 /**
- * 零安装 runner:定位 pi 自带 jiti,用它加载并执行 TS 脚本。
+ * 零安装 runner:定位 jiti,用它加载并执行 TS 脚本。
  *
  * 用法: node scripts/run.mjs scripts/smoke.ts [args...]
  *
  * 定位顺序:
  *   1. 环境变量 JITI_PATH(绝对路径到 jiti 的 lib/jiti.mjs)
- *   2. pi 自带 jiti 的固定路径
+ *   2. 本仓 node_modules 里的 jiti(CI / npm install 后)
+ *   3. pi 自带 jiti 的固定路径(本机零安装)
  * 找不到则报错并提示回退方案(npm install --no-save jiti 后 npx jiti)。
  */
 import { createRequire } from "node:module";
@@ -19,11 +20,17 @@ const ROOT = path.resolve(__dirname, "..");
 
 const PI_JITI =
 	"/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
-const CANDIDATES = process.env.JITI_PATH
-	? [process.env.JITI_PATH, PI_JITI]
-	: [PI_JITI];
 
 let jitiUrl = null;
+const CANDIDATES = [];
+if (process.env.JITI_PATH) CANDIDATES.push(process.env.JITI_PATH);
+try {
+	CANDIDATES.push(createRequire(path.join(ROOT, "package.json")).resolve("jiti/lib/jiti.mjs"));
+} catch {
+	// node_modules 里没有 jiti,继续下一个候选
+}
+CANDIDATES.push(PI_JITI);
+
 for (const c of CANDIDATES) {
 	try {
 		await import(c); // 探测能否加载

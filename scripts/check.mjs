@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /**
- * 零依赖语法检查:用全局 typescript 的 transpileModule 逐个转译项目 .ts 文件,
+ * 零依赖语法检查:用 typescript 的 transpileModule 逐个转译项目 .ts 文件,
  * 只报告语法级错误(不做类型检查,类型检查见 tsc --noEmit 尽力而为)。
  *
- * 用法: NODE_PATH=/opt/homebrew/lib/node_modules node scripts/check.mjs
+ * 解析顺序:本仓 node_modules(CI / npm install 后)→ 全局 typescript
+ * (NODE_PATH=/opt/homebrew/lib/node_modules,本机零安装)。
  */
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -11,19 +12,22 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const require = createRequire(import.meta.url);
+const ROOT = path.resolve(__dirname, "..");
 
 let ts;
 try {
-	ts = require("typescript");
+	ts = createRequire(path.join(ROOT, "package.json"))("typescript");
 } catch {
-	console.error(
-		"check.mjs: 找不到全局 typescript(尝试 NODE_PATH=/opt/homebrew/lib/node_modules)",
-	);
-	process.exit(1);
+	try {
+		ts = createRequire(import.meta.url)("typescript");
+	} catch {
+		console.error(
+			"check.mjs: 找不到 typescript(npm install 或 NODE_PATH=/opt/homebrew/lib/node_modules)",
+		);
+		process.exit(1);
+	}
 }
 
-const ROOT = path.resolve(__dirname, "..");
 // 需要语法检查的 .ts 文件:宿主 + lib + animations + smoke 测试
 const targets = [
 	"index.ts",

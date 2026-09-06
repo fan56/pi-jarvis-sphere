@@ -6,3 +6,5 @@ pi-javise.mov
 
 # rpiv 规划产物(内部文档,不入库)
 .rpiv/
+
+node_modules/
